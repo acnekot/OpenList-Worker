@@ -23,12 +23,15 @@
 // 用户填入的值会成为该 Worker 的 Secret，后续更新不会被覆盖。
 // =============================================================================
 {
-  "name": "openlist-tsworkers",
+  "name": "gcloud-catsuki-openlist",
   "main": "src/backend/worker.ts",
   "compatibility_date": "2026-08-04",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "routes": [
+    { "pattern": "gcloud.catsuki.cc", "custom_domain": true }
+  ],
 
   // ⚠️ run_worker_first 只放行 HTML 入口，不能改成 true（全量放行）：
   //   默认「资源优先」时 / 与 /index.html 由静态层直接返回，Worker 根本不会执行，
@@ -39,7 +42,7 @@
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
-    "run_worker_first": ["/", "/index.html"]
+    "run_worker_first": ["/", "/index.html", "/oauth-info", "/privacy", "/terms"]
   },
 
   // ===========================================================================
@@ -53,7 +56,7 @@
     //   map（默认）- 整对象序列化为单个 JSON 键值，适合 KV/Blob
     //   key        - 分 key 存储，每实体一条记录（如 users_1）
     //   sql        - 关系表格式，与 Go 后端一致（适用于 D1/MySQL）
-    "DB_FORMAT": "map",
+    "DB_FORMAT": "sql",
 
     // 数据库驱动：
     //   auto（默认）- 自动检测，顺序 mysql → d1 → kv → cfkv → blob → do
@@ -64,7 +67,7 @@
     //   do         - Cloudflare Durable Objects（需下方 durable_objects）
     //   mysql      - 外部 MySQL（需 MYSQL_URLS 或 MYSQL_HOST 等，仅 Node 运行时）
     // 说明：mysql 仅在配置了连接信息时才参与 auto 探测，避免无谓的 TCP 建连。
-    "DB_DRIVER": "auto",
+    "DB_DRIVER": "d1",
 
     // 敏感字段落盘算法（默认 none：不加密；与 DB_DRIVER/DB_FORMAT 正交）：
     //   none（默认）              - 不加密，敏感字段明文落盘
@@ -80,7 +83,7 @@
     //       因此把该项改回 none 不会导致既有数据不可读（下次保存自动转为明文）。
     // 注意：该项与 JWT 密钥无关 —— DB_CIPHER=none 时，未配置 JWT_SECRET 仍会
     //       自动生成并持久化共享密钥（JWT 签名需要）。
-    "DB_CIPHER": "none",
+    "DB_CIPHER": "aes-256-gcm",
 
     // ── 安全鉴权（推荐以 Secret 类型配置，见 .dev.vars.example）──────────
     //
@@ -161,9 +164,9 @@
   //   控制台：Workers & Pages → D1 → 创建数据库 → 绑定到 Worker，变量名填 DB
   //   省略 database_id 时，wrangler >= 4.45.0 会自动创建同名库并回写
   //
-  // "d1_databases": [
-  //   { "binding": "DB", "database_name": "openlist", "database_id": "" }
-  // ],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "gcloud-catsuki-openlist-db", "database_id": "41df3dcf-6f0a-499c-873e-8537bf462811", "remote": true }
+  ],
   //
   // ▶ 方案 C：Durable Objects（内置 SQLite，强一致；DB_FORMAT 建议改为 "sql"）
   //   注意：DO 需要 migrations，且删除成本高，适合单租户部署。
