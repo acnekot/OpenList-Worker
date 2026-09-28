@@ -22,14 +22,14 @@ const pages: Record<string, string> = {
   '/oauth-info': page('应用说明', `
     <h1>OpenList catsuki Drive</h1>
     <p>这是站点所有者用于访问本人 Google 云端硬盘的私人文件列表。站点运行在 Cloudflare Workers，配置保存在 Cloudflare D1；访客不能浏览或下载云盘内容。</p>
-    <p>应用仅请求 <code>drive.readonly</code> 权限，用于列出文件夹、显示文件信息和按所有者的请求读取或下载文件。应用没有 Google Drive 写入权限。</p>
+    <p>应用请求 Google Drive 完整权限 <code>drive</code>，用于管理员浏览、下载文件，并向整个云端硬盘的现有文件夹上传。此权限在 Google 层面也允许修改、移动及删除文件；站点仅向已登录的管理员提供文件管理入口。</p>
     <p>云盘管理入口需要站点管理员登录。有关数据处理方式和使用规则，请阅读<a href="/privacy">隐私政策</a>和<a href="/terms">使用条款</a>。</p>
   `),
   '/privacy': page('隐私政策', `
     <h1>隐私政策</h1>
     <p>OpenList catsuki Drive 供站点所有者个人使用。只有站点所有者可登录云盘管理入口。</p>
     <h2>访问的数据与用途</h2>
-    <p>在所有者通过 Google 授权后，应用使用 Google Drive 的只读权限读取文件夹、文件名、大小等信息，并按所有者的操作读取文件内容，以提供目录浏览、预览和下载。应用不会修改或删除 Google Drive 文件。</p>
+    <p>在所有者通过 Google 授权后，应用使用 Google Drive 完整权限读取文件夹、文件名、大小等信息，并按管理员的操作读取文件内容、上传文件以及执行其他文件管理操作。授权范围覆盖该账号的整个云端硬盘，包括修改和删除文件的能力。应用不会在管理员未操作时主动修改或删除云盘文件。</p>
     <h2>存储与传输</h2>
     <p>OAuth 授权配置和站点账户配置保存在所有者的 Cloudflare D1 中，其中敏感字段使用加密存储。文件下载经 Cloudflare Workers 从 Google Drive 流式传输；文件内容不作为站点的永久副本写入 D1。Cloudflare 和 Google 会为提供这些服务而处理相关请求数据。站点可能临时缓存目录信息，并产生必要的服务运行日志。</p>
     <h2>共享与保留</h2>
@@ -39,7 +39,8 @@ const pages: Record<string, string> = {
   `),
   '/terms': page('使用条款', `
     <h1>使用条款</h1>
-    <p>OpenList catsuki Drive 是站点所有者的私人文件访问工具。云盘目录、预览和下载仅供获得管理员授权的人使用；不得尝试绕过登录或下载保护。</p>
+    <p>OpenList catsuki Drive 是站点所有者的私人文件管理工具。云盘目录、预览、下载和上传仅供获得管理员授权的人使用；不得尝试绕过登录或下载保护。</p>
+    <p>管理员应确认上传内容及目标文件夹。管理界面中的删除操作可能永久删除 Google Drive 文件，请谨慎使用。</p>
     <p>站点所有者负责其云盘文件的内容及合法使用。服务依赖 Google Drive 和 Cloudflare，可能因这些服务的可用性或授权状态而中断。</p>
     <p>站点所有者可调整或停止此私人服务。如需联系，请发送邮件至 <a href="mailto:acnekot@gmail.com">acnekot@gmail.com</a>。</p>
   `),
