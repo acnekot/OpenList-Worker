@@ -13,7 +13,7 @@ import {
 } from "../internal/op/storage"
 import { resolveShare } from "../internal/op/share"
 import { resolvePath } from "../internal/model/db"
-import { getUserFromContext } from "./middlewares"
+import { getJwtSecret, getUserFromContext } from "./middlewares"
 import { canWrite, getActualPath, isAdmin } from "../pkg/permission"
 import {
   getNearestMeta,
@@ -885,6 +885,182 @@ fsRouter.put("/form", async (c) => {
     return c.json({ code: 200, message: "success", data: null })
   } catch (e: any) {
     return c.json({ code: 500, message: safeErrorMessage(e), data: null })
+  }
+})
+
+// Google Drive's resumable protocol allows arbitrarily large files while each
+// Worker request carries only an 8 MiB chunk. The signed token lets another
+// Worker isolate continue the same Google session without process-local state.
+const GOOGLE_CHUNK_SIZE = 8 * 1024 * 1024
+type GoogleUploadGrant = {
+  url: string
+  size: number
+  path: string
+  userId: number
+  expires: number
+}
+
+async function uploadSigningKey(c: any): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(await getJwtSecret(c)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"],
+  )
+}
+
+async function signGoogleUpload(c: any, grant: GoogleUploadGrant): Promise<string> {
+  const payload = Buffer.from(JSON.stringify(grant)).toString("base64url")
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await uploadSigningKey(c),
+    new TextEncoder().encode(payload),
+  )
+  return `${payload}.${Buffer.from(signature).toString("base64url")}`
+}
+
+async function readGoogleUploadGrant(c: any, userId: number): Promise<GoogleUploadGrant | null> {
+  const token = c.req.header("X-Google-Upload-Token") || ""
+  const [payload, signature, extra] = token.split(".")
+  if (!payload || !signature || extra || token.length > 4096) return null
+  try {
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      await uploadSigningKey(c),
+      Buffer.from(signature, "base64url"),
+      new TextEncoder().encode(payload),
+    )
+    if (!valid) return null
+    const grant = JSON.parse(Buffer.from(payload, "base64url").toString()) as GoogleUploadGrant
+    const url = new URL(grant.url)
+    if (
+      grant.userId !== userId ||
+      grant.expires < Date.now() ||
+      !Number.isSafeInteger(grant.size) ||
+      grant.size <= 0 ||
+      url.protocol !== "https:" ||
+      url.hostname !== "www.googleapis.com" ||
+      url.pathname !== "/upload/drive/v3/files"
+    ) return null
+    return grant
+  } catch {
+    return null
+  }
+}
+
+function googleUploadProgress(res: Response, size: number) {
+  if (res.ok) return { complete: true, next_offset: size }
+  if (res.status === 308) {
+    const range = res.headers.get("Range") || ""
+    const match = /^bytes=0-(\d+)$/.exec(range)
+    return { complete: false, next_offset: match ? Number(match[1]) + 1 : 0 }
+  }
+  throw new Error(`Google Drive upload failed (HTTP ${res.status})`)
+}
+
+fsRouter.post("/google_drive/upload/start", async (c) => {
+  const user = await getUserFromContext(c)
+  if (!canWrite(user)) return permissionDenied(c)
+  const body = await c.req.json().catch(() => ({}))
+  const path = body.path
+  const size = body.size
+  const mimeType = typeof body.mime_type === "string" && body.mime_type.length < 128
+    ? body.mime_type : "application/octet-stream"
+  if (
+    typeof path !== "string" || !path.startsWith("/") ||
+    path.split("/").includes("..") || !Number.isSafeInteger(size) || size <= 0
+  ) return c.json({ code: 400, message: "Invalid upload path or size", data: null }, 400)
+  try {
+    validateDirPath(path)
+    const reqPath = getActualPath(user, path)
+    const parent = reqPath.slice(0, reqPath.lastIndexOf("/")) || "/"
+    const meta = await getNearestMeta(parent, c.env)
+    if (!canWriteMeta(user, meta, parent)) return permissionDenied(c)
+    const resolved = await resolvePath(reqPath)
+    if (resolved.isVirtual || !resolved.storage) {
+      return c.json({ code: 400, message: "Choose a Google Drive folder", data: null }, 400)
+    }
+    const driver = await getDriver(resolved.storage.driver, resolved.storage)
+    if (typeof (driver as any).startResumableUpload !== "function") {
+      return c.json({ code: 400, message: "Storage does not support large uploads", data: null }, 400)
+    }
+    const url = await (driver as any).startResumableUpload(resolved.physical!, size, mimeType)
+    const token = await signGoogleUpload(c, {
+      url, size, path: reqPath, userId: user!.id || 0,
+      expires: Date.now() + 6 * 60 * 60 * 1000,
+    })
+    return c.json({ code: 200, message: "success", data: { token, chunk_size: GOOGLE_CHUNK_SIZE } })
+  } catch (e: any) {
+    return c.json({ code: 500, message: safeErrorMessage(e), data: null }, 500)
+  }
+})
+
+fsRouter.put("/google_drive/upload/chunk", async (c) => {
+  const user = await getUserFromContext(c)
+  if (!canWrite(user)) return permissionDenied(c)
+  const grant = await readGoogleUploadGrant(c, user!.id || 0)
+  if (!grant) return c.json({ code: 403, message: "Invalid upload session", data: null }, 403)
+  const parent = grant.path.slice(0, grant.path.lastIndexOf("/")) || "/"
+  if (!canWriteMeta(user, await getNearestMeta(parent, c.env), parent)) return permissionDenied(c)
+  const offset = Number(c.req.header("X-Upload-Offset"))
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset >= grant.size) {
+    return c.json({ code: 400, message: "Invalid upload offset", data: null }, 400)
+  }
+  const length = Number(c.req.header("Content-Length") || 0)
+  if (length > GOOGLE_CHUNK_SIZE) {
+    return c.json({ code: 413, message: "Chunk exceeds 8 MiB", data: null }, 413)
+  }
+  const reader = c.req.raw.body?.getReader()
+  if (!reader) return c.json({ code: 400, message: "Missing chunk body", data: null }, 400)
+  const parts: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > GOOGLE_CHUNK_SIZE) {
+      await reader.cancel()
+      return c.json({ code: 413, message: "Chunk exceeds 8 MiB", data: null }, 413)
+    }
+    parts.push(value)
+  }
+  if (total === 0 || offset + total > grant.size ||
+      (offset + total < grant.size && total % (256 * 1024) !== 0)) {
+    return c.json({ code: 400, message: "Invalid chunk size", data: null }, 400)
+  }
+  try {
+    const res = await fetch(grant.url, {
+      method: "PUT",
+      redirect: "manual",
+      headers: {
+        "Content-Range": `bytes ${offset}-${offset + total - 1}/${grant.size}`,
+        "Content-Type": "application/octet-stream",
+      },
+      body: Buffer.concat(parts.map((part) => Buffer.from(part)), total),
+    })
+    return c.json({ code: 200, message: "success", data: googleUploadProgress(res, grant.size) })
+  } catch (e: any) {
+    return c.json({ code: 502, message: safeErrorMessage(e), data: null }, 502)
+  }
+})
+
+fsRouter.get("/google_drive/upload/status", async (c) => {
+  const user = await getUserFromContext(c)
+  if (!canWrite(user)) return permissionDenied(c)
+  const grant = await readGoogleUploadGrant(c, user!.id || 0)
+  if (!grant) return c.json({ code: 403, message: "Invalid upload session", data: null }, 403)
+  const parent = grant.path.slice(0, grant.path.lastIndexOf("/")) || "/"
+  if (!canWriteMeta(user, await getNearestMeta(parent, c.env), parent)) return permissionDenied(c)
+  try {
+    const res = await fetch(grant.url, {
+      method: "PUT",
+      redirect: "manual",
+      headers: { "Content-Range": `bytes */${grant.size}` },
+    })
+    return c.json({ code: 200, message: "success", data: googleUploadProgress(res, grant.size) })
+  } catch (e: any) {
+    return c.json({ code: 502, message: safeErrorMessage(e), data: null }, 502)
   }
 })
 

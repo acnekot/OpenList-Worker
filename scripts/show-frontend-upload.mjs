@@ -34,33 +34,19 @@ for (const name of fs.readdirSync(path.join(dist, "assets")).filter((name) => /^
 
 const htmlPath = path.join(dist, "index.html")
 let html = fs.readFileSync(htmlPath, "utf8")
+const clientScript = fs.readFileSync(path.join(root, "scripts", "frontend-upload-client.js"), "utf8")
 const enhancement = `
 <style>
   #catsuki-upload-button{display:inline-flex;align-self:flex-start;align-items:center;gap:.4rem;margin:.25rem 0 0;padding:.45rem .8rem;border:0;border-radius:.55rem;background:#2684e8;color:white;font:600 .9rem system-ui;cursor:pointer}
   #catsuki-upload-button:hover{background:#1269c3}
   #catsuki-upload-button:focus-visible{outline:2px solid currentColor;outline-offset:2px}
+  .catsuki-upload-icon{display:none!important}
+  #catsuki-upload-progress{position:fixed;left:1rem;bottom:1rem;z-index:9999;display:grid;gap:.5rem;width:min(21rem,calc(100vw - 2rem));padding:1rem;border-radius:.7rem;background:#25292f;color:white;box-shadow:0 8px 28px #0008;font:14px system-ui}
+  #catsuki-upload-progress progress{width:100%}
+  #catsuki-upload-progress button{justify-self:end;padding:.3rem .7rem;cursor:pointer}
 </style>
 <script>
-(() => {
-  function syncUploadButton() {
-    const icon = document.querySelector('.catsuki-upload-icon');
-    const breadcrumb = document.querySelector('[aria-label="breadcrumb"]');
-    let button = document.getElementById('catsuki-upload-button');
-    if (!icon || !breadcrumb) { button?.remove(); return; }
-    if (!button) {
-      button = document.createElement('button');
-      button.id = 'catsuki-upload-button';
-      button.type = 'button';
-      button.textContent = '↑ 上传文件';
-      button.addEventListener('click', () => document.querySelector('.catsuki-upload-icon')?.dispatchEvent(new MouseEvent('click', {bubbles:true})));
-      breadcrumb.after(button);
-    }
-  }
-  addEventListener('DOMContentLoaded', () => {
-    new MutationObserver(syncUploadButton).observe(document.getElementById('root'), {childList:true,subtree:true});
-    syncUploadButton();
-  });
-})();
+${clientScript}
 </script>
 `
 html = html.replace(/<!-- catsuki upload enhancement -->[\s\S]*?<!-- end catsuki upload enhancement -->/, "")

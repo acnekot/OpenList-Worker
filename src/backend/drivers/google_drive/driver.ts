@@ -144,4 +144,12 @@ export class GoogleDrive implements StorageDriver {
       await this.client.resolveParentAndName(physicalPath)
     await this.client.putFile(parentId, name, content)
   }
+
+  async startResumableUpload(
+    physicalPath: string,
+    size: number,
+    mimeType: string,
+  ): Promise<string> {
+    return this.client.startResumableUpload(physicalPath, size, mimeType)
+  }
 }

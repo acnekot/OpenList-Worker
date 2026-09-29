@@ -383,6 +383,35 @@ export class GoogleDriveClient {
     }
   }
 
+  /** Start a Google resumable upload without buffering the whole file in a Worker. */
+  public async startResumableUpload(
+    physicalPath: string,
+    size: number,
+    mimeType: string,
+  ): Promise<string> {
+    const { parentId, name } = await this.resolveParentAndName(physicalPath)
+    await this.ensureToken()
+    const res = await fetch(
+      `${GDRIVE_UPLOAD_API}/files?uploadType=resumable&supportsAllDrives=true`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+          "Content-Type": "application/json",
+          "X-Upload-Content-Type": mimeType,
+          "X-Upload-Content-Length": String(size),
+        },
+        body: JSON.stringify({ name, parents: [parentId] }),
+      },
+    )
+    if (!res.ok) throw new Error(`[GoogleDrive] Upload init failed: ${res.status}`)
+    const url = res.headers.get("Location") || ""
+    if (!url || new URL(url).hostname !== "www.googleapis.com") {
+      throw new Error("[GoogleDrive] Invalid upload session URL")
+    }
+    return url
+  }
+
   // ===================================================
   // Path resolution (virtualPath -> file_id)
   // ===================================================
