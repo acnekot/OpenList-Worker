@@ -41,9 +41,13 @@ const enhancement = `
   #catsuki-upload-button:hover{background:#1269c3}
   #catsuki-upload-button:focus-visible{outline:2px solid currentColor;outline-offset:2px}
   .catsuki-upload-icon{display:none!important}
-  #catsuki-upload-progress{position:fixed;left:1rem;bottom:1rem;z-index:9999;display:grid;gap:.5rem;width:min(21rem,calc(100vw - 2rem));padding:1rem;border-radius:.7rem;background:#25292f;color:white;box-shadow:0 8px 28px #0008;font:14px system-ui}
+  #catsuki-upload-progress{position:fixed;left:1rem;bottom:1rem;z-index:9999;display:grid;gap:.45rem;width:min(25rem,calc(100vw - 2rem));padding:1rem;border-radius:.7rem;background:#25292f;color:white;box-shadow:0 8px 28px #0008;font:14px system-ui}
+  #catsuki-upload-progress strong{font-size:1rem}
+  #catsuki-upload-progress .catsuki-upload-name{font-weight:600;overflow-wrap:anywhere}
+  #catsuki-upload-progress .catsuki-upload-actions{display:flex;justify-content:flex-end;gap:.5rem;margin-top:.25rem}
   #catsuki-upload-progress progress{width:100%}
-  #catsuki-upload-progress button{justify-self:end;padding:.3rem .7rem;cursor:pointer}
+  #catsuki-upload-progress button{padding:.4rem .75rem;cursor:pointer;border-radius:.4rem;border:1px solid #6b7280;background:#374151;color:white}
+  #catsuki-upload-progress button:disabled{opacity:.55;cursor:wait}
 </style>
 <script>
 ${clientScript}
