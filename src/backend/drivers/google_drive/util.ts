@@ -198,6 +198,45 @@ export class GoogleDriveClient {
     return about.storageQuota || {}
   }
 
+  public async getFolderUsage(physicalPath: string): Promise<number> {
+    const rootId = await this.resolveFileId(physicalPath)
+    const pending = [rootId]
+    const seen = new Set<string>()
+    let total = 0
+    while (pending.length) {
+      const parentId = pending.shift()!
+      if (seen.has(parentId)) continue
+      seen.add(parentId)
+      let pageToken: string | undefined
+      do {
+        const params = new URLSearchParams({
+          q: `'${parentId.replace(/'/g, "\\'")}' in parents and trashed = false`,
+          fields: "nextPageToken,files(id,mimeType,size)",
+          pageSize: "1000",
+          supportsAllDrives: "true",
+          includeItemsFromAllDrives: "true",
+        })
+        if (pageToken) params.set("pageToken", pageToken)
+        const result = await this.request<{
+          files?: Array<{ id: string; mimeType: string; size?: string }>
+          nextPageToken?: string
+        }>(`${GDRIVE_API}/files?${params.toString()}`)
+        for (const file of result.files || []) {
+          if (file.mimeType === GOOGLE_DRIVE_FOLDER_MIME) pending.push(file.id)
+          else {
+            const size = Number(file.size || 0)
+            if (!Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(total + size)) {
+              throw new Error("Google Drive folder size exceeds safe integer range")
+            }
+            total += size
+          }
+        }
+        pageToken = result.nextPageToken
+      } while (pageToken)
+    }
+    return total
+  }
+
   // ===================================================
   // File Operations
   // ===================================================

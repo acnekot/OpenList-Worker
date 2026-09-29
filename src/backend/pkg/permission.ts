@@ -94,6 +94,9 @@ export function getActualPath(
 ): string {
   const p = reqPath || "/"
   if (p.startsWith("/@s")) {
+    if (user?.base_path && user.base_path !== "/") {
+      throw new Error("Share path is outside user root")
+    }
     return p
   }
 
@@ -110,6 +113,19 @@ export function getActualPath(
   }
 
   const cleanReq = p.startsWith("/") ? p : `/${p}`
+  // resolvePath normalizes dot segments after this function prefixes base_path.
+  // Reject them first, including nested encodings, so a scoped user cannot
+  // escape their root with e.g. /../../another-folder.
+  let decoded = cleanReq
+  for (let i = 0; i < 16; i++) {
+    let next: string
+    try { next = decodeURIComponent(decoded) } catch { next = decoded }
+    if (next === decoded) break
+    decoded = next
+  }
+  if (decoded.replace(/\\/g, "/").split("/").includes("..")) {
+    throw new Error("Path escapes user root")
+  }
   if (cleanReq === "/") {
     return basePath
   }

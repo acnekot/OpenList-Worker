@@ -41,6 +41,14 @@ import {
 import { parseZip, extractZipEntry, ZipArchive } from "../internal/archive/zip"
 import { assertSafeUrl, getTrustedHosts } from "../pkg/http"
 import { seedRouter } from "./seed"
+import {
+  activeFolderQuotaReservation,
+  completeFolderQuotaReservation,
+  folderQuotaPolicy,
+  folderQuotaStatus,
+  releaseFolderQuotaReservation,
+  reserveFolderQuota,
+} from "./folder-quota"
 
 /**
  * 该路径所属存储是否禁止目录列表（对齐 Go handles.FsList 的 DisableIndex 判断）。
@@ -68,6 +76,28 @@ import {
 } from "../internal/upload/multipart"
 
 export const fsRouter = new Hono()
+// The quota account may browse and manage its own files, but only the upload
+// endpoints below may create bytes. This also closes copy/seed/archive bypasses.
+fsRouter.use("*", async (c, next) => {
+  const user = await getUserFromContext(c)
+  let policy
+  try { policy = folderQuotaPolicy(user, c.env) }
+  catch (e: any) { return c.json({ code: 503, message: safeErrorMessage(e), data: null }, 503) }
+  if (policy && c.req.method !== "GET" && c.req.method !== "HEAD") {
+    const safePosts = new Set([
+      "/dirs", "/list", "/get", "/search", "/mkdir", "/rename", "/remove",
+      "/move", "/batch_rename", "/regex_rename", "/recursive_move",
+      "/remove_empty_directory", "/archive/meta", "/archive/list",
+      "/google_drive/upload/start",
+    ])
+    const safePuts = new Set(["/put", "/form", "/google_drive/upload/chunk"])
+    if (!(c.req.method === "POST" && safePosts.has(c.req.path.replace(/^\/api\/fs/, ""))) &&
+        !(c.req.method === "PUT" && safePuts.has(c.req.path.replace(/^\/api\/fs/, "")))) {
+      return c.json({ code: 403, message: "This account cannot use an unmetered write operation", data: null }, 403)
+    }
+  }
+  await next()
+})
 fsRouter.route("/seed", seedRouter)
 
 const getStorageRequestContext = (c: any) => {
@@ -835,7 +865,14 @@ fsRouter.put("/put", async (c) => {
   }
   try {
     const buffer = await c.req.arrayBuffer()
-    await putItem(reqPath, Buffer.from(buffer), requestContext)
+    const reservation = await reserveFolderQuota(user!, c.env, buffer.byteLength)
+    try {
+      await putItem(reqPath, Buffer.from(buffer), requestContext)
+      await completeFolderQuotaReservation(c.env, reservation)
+    } catch (e) {
+      await releaseFolderQuotaReservation(c.env, reservation)
+      throw e
+    }
     return c.json({ code: 200, message: "success", data: null })
   } catch (e: any) {
     return c.json({ code: 500, message: safeErrorMessage(e), data: null })
@@ -881,7 +918,14 @@ fsRouter.put("/form", async (c) => {
       })
     }
     const buffer = Buffer.from(await (file as File).arrayBuffer())
-    await putItem(reqPath, buffer, requestContext)
+    const reservation = await reserveFolderQuota(user!, c.env, buffer.byteLength)
+    try {
+      await putItem(reqPath, buffer, requestContext)
+      await completeFolderQuotaReservation(c.env, reservation)
+    } catch (e) {
+      await releaseFolderQuotaReservation(c.env, reservation)
+      throw e
+    }
     return c.json({ code: 200, message: "success", data: null })
   } catch (e: any) {
     return c.json({ code: 500, message: safeErrorMessage(e), data: null })
@@ -898,6 +942,7 @@ type GoogleUploadGrant = {
   path: string
   userId: number
   expires: number
+  reservationId?: string
 }
 
 async function uploadSigningKey(c: any): Promise<CryptoKey> {
@@ -983,6 +1028,18 @@ fsRouter.get("/google_drive/quota", async (c) => {
   }
 })
 
+fsRouter.get("/folder_quota", async (c) => {
+  const user = await getUserFromContext(c)
+  if (!user || user.disabled) return permissionDenied(c)
+  try {
+    const data = await folderQuotaStatus(user, c.env)
+    if (!data) return c.json({ code: 404, message: "No folder quota", data: null }, 404)
+    return c.json({ code: 200, message: "success", data })
+  } catch (e: any) {
+    return c.json({ code: 502, message: safeErrorMessage(e), data: null }, 502)
+  }
+})
+
 fsRouter.post("/google_drive/upload/start", async (c) => {
   const user = await getUserFromContext(c)
   if (!canWrite(user)) return permissionDenied(c)
@@ -995,6 +1052,7 @@ fsRouter.post("/google_drive/upload/start", async (c) => {
     typeof path !== "string" || !path.startsWith("/") ||
     path.split("/").includes("..") || !Number.isSafeInteger(size) || size <= 0
   ) return c.json({ code: 400, message: "Invalid upload path or size", data: null }, 400)
+  let reservation: string | null = null
   try {
     validateDirPath(path)
     const reqPath = getActualPath(user, path)
@@ -1009,13 +1067,16 @@ fsRouter.post("/google_drive/upload/start", async (c) => {
     if (typeof (driver as any).startResumableUpload !== "function") {
       return c.json({ code: 400, message: "Storage does not support large uploads", data: null }, 400)
     }
+    reservation = await reserveFolderQuota(user!, c.env, size)
     const url = await (driver as any).startResumableUpload(resolved.physical!, size, mimeType)
     const token = await signGoogleUpload(c, {
       url, size, path: reqPath, userId: user!.id || 0,
       expires: Date.now() + 6 * 60 * 60 * 1000,
+      ...(reservation ? { reservationId: reservation } : {}),
     })
     return c.json({ code: 200, message: "success", data: { token, chunk_size: GOOGLE_CHUNK_SIZE } })
   } catch (e: any) {
+    await releaseFolderQuotaReservation(c.env, reservation)
     return c.json({ code: 500, message: safeErrorMessage(e), data: null }, 500)
   }
 })
@@ -1025,6 +1086,10 @@ fsRouter.put("/google_drive/upload/chunk", async (c) => {
   if (!canWrite(user)) return permissionDenied(c)
   const grant = await readGoogleUploadGrant(c, user!.id || 0)
   if (!grant) return c.json({ code: 403, message: "Invalid upload session", data: null }, 403)
+  if (folderQuotaPolicy(user, c.env) &&
+      (!grant.reservationId || !await activeFolderQuotaReservation(c.env, grant.reservationId))) {
+    return permissionDenied(c)
+  }
   const parent = grant.path.slice(0, grant.path.lastIndexOf("/")) || "/"
   if (!canWriteMeta(user, await getNearestMeta(parent, c.env), parent)) return permissionDenied(c)
   const offset = Number(c.req.header("X-Upload-Offset"))
@@ -1063,7 +1128,9 @@ fsRouter.put("/google_drive/upload/chunk", async (c) => {
       },
       body: Buffer.concat(parts.map((part) => Buffer.from(part)), total),
     })
-    return c.json({ code: 200, message: "success", data: googleUploadProgress(res, grant.size) })
+    const progress = googleUploadProgress(res, grant.size)
+    if (progress.complete) await completeFolderQuotaReservation(c.env, grant.reservationId)
+    return c.json({ code: 200, message: "success", data: progress })
   } catch (e: any) {
     return c.json({ code: 502, message: safeErrorMessage(e), data: null }, 502)
   }
@@ -1074,6 +1141,10 @@ fsRouter.get("/google_drive/upload/status", async (c) => {
   if (!canWrite(user)) return permissionDenied(c)
   const grant = await readGoogleUploadGrant(c, user!.id || 0)
   if (!grant) return c.json({ code: 403, message: "Invalid upload session", data: null }, 403)
+  if (folderQuotaPolicy(user, c.env) &&
+      (!grant.reservationId || !await activeFolderQuotaReservation(c.env, grant.reservationId))) {
+    return permissionDenied(c)
+  }
   const parent = grant.path.slice(0, grant.path.lastIndexOf("/")) || "/"
   if (!canWriteMeta(user, await getNearestMeta(parent, c.env), parent)) return permissionDenied(c)
   try {
@@ -1082,7 +1153,9 @@ fsRouter.get("/google_drive/upload/status", async (c) => {
       redirect: "manual",
       headers: { "Content-Range": `bytes */${grant.size}` },
     })
-    return c.json({ code: 200, message: "success", data: googleUploadProgress(res, grant.size) })
+    const progress = googleUploadProgress(res, grant.size)
+    if (progress.complete) await completeFolderQuotaReservation(c.env, grant.reservationId)
+    return c.json({ code: 200, message: "success", data: progress })
   } catch (e: any) {
     return c.json({ code: 502, message: safeErrorMessage(e), data: null }, 502)
   }

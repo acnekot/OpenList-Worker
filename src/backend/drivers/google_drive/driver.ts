@@ -156,4 +156,8 @@ export class GoogleDrive implements StorageDriver {
   async getStorageQuota() {
     return this.client.getStorageQuota()
   }
+
+  async getFolderUsage(physicalPath: string) {
+    return this.client.getFolderUsage(physicalPath)
+  }
 }

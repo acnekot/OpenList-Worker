@@ -129,10 +129,9 @@
     const refresh = document.querySelector('.left-toolbar-in [tips="refresh"]');
     refresh?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     const mount = currentMount();
-    if (mount) {
-      quotaCache.delete(mount);
-      syncQuota();
-    }
+    if (mount) quotaCache.delete(mount);
+    quotaCache.delete('@folder');
+    syncQuota();
   }
 
   function currentMount() {
@@ -153,13 +152,31 @@
     const button = document.getElementById('catsuki-upload-button');
     let card = document.getElementById('catsuki-drive-quota');
     const mount = currentMount();
-    if (!button || !mount) { card?.remove(); return; }
+    if (!button) { card?.remove(); return; }
     if (!card) {
       card = document.createElement('section');
       card.id = 'catsuki-drive-quota';
       card.setAttribute('aria-label', 'Google 云盘容量');
-      button.after(card);
+      (document.getElementById('catsuki-folder-button') || button).after(card);
     }
+    const folder = quotaCache.get('@folder');
+    if (!folder || Date.now() - folder.time >= 5 * 60 * 1000) {
+      if (card.textContent !== '容量 · 正在读取…') card.textContent = '容量 · 正在读取…';
+      if (!quotaPending.has('@folder')) {
+        quotaPending.add('@folder');
+        api('folder_quota', { headers: apiHeaders() })
+          .then(data => quotaCache.set('@folder', { data, time: Date.now() }))
+          .catch(() => quotaCache.set('@folder', { error: true, time: Date.now() }))
+          .finally(() => { quotaPending.delete('@folder'); syncQuota(); });
+      }
+      return;
+    }
+    if (folder.data) {
+      const display = `专属文件夹 · 已用 ${quotaText(folder.data.used)} / ${quotaText(folder.data.limit)} · 剩余 ${quotaText(Math.max(0, folder.data.limit - folder.data.used))}`;
+      if (card.textContent !== display) card.textContent = display;
+      return;
+    }
+    if (!mount) { card.remove(); return; }
     const cached = quotaCache.get(mount);
     let display = `${mount.slice(1)} 容量 · 正在读取…`;
     if (cached?.error) display = `${mount.slice(1)} 容量暂不可用`;
@@ -281,11 +298,59 @@
   });
 
   function openPicker() { if (!busy) input.click(); }
+  function openFolderDialog() {
+    if (document.getElementById('catsuki-folder-dialog')) return;
+    const dialog = document.createElement('form');
+    dialog.id = 'catsuki-folder-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-label', '新建文件夹');
+    const title = document.createElement('strong');
+    title.textContent = '新建文件夹';
+    const name = document.createElement('input');
+    name.placeholder = '文件夹名称';
+    name.required = true;
+    const error = document.createElement('div');
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = '取消';
+    cancel.addEventListener('click', () => dialog.remove());
+    const confirm = document.createElement('button');
+    confirm.type = 'submit';
+    confirm.textContent = '创建';
+    dialog.addEventListener('submit', async event => {
+      event.preventDefault();
+      const value = name.value.trim();
+      if (!value || value === '.' || value === '..' || /[\\/\0]/.test(value)) {
+        error.textContent = '请输入有效的文件夹名称';
+        return;
+      }
+      confirm.disabled = true;
+      try {
+        const directory = decodeURIComponent(location.pathname).replace(/\/$/, '');
+        await api('mkdir', {
+          method: 'POST',
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ path: `${directory}/${value}` }),
+        });
+        dialog.remove();
+        refreshDirectory();
+      } catch (e) {
+        error.textContent = e.message || String(e);
+        confirm.disabled = false;
+      }
+    });
+    dialog.append(title, name, error, cancel, confirm);
+    document.body.append(dialog);
+    name.focus();
+  }
   function syncUploadButton() {
     const icon = document.querySelector('.catsuki-upload-icon');
     const breadcrumb = document.querySelector('[aria-label="breadcrumb"]');
     let button = document.getElementById('catsuki-upload-button');
-    if (!icon || !breadcrumb) { button?.remove(); document.getElementById('catsuki-drive-quota')?.remove(); return; }
+    let folderButton = document.getElementById('catsuki-folder-button');
+    if (!icon || !breadcrumb) {
+      button?.remove(); folderButton?.remove(); document.getElementById('catsuki-drive-quota')?.remove(); return;
+    }
     if (!button) {
       button = document.createElement('button');
       button.id = 'catsuki-upload-button';
@@ -293,6 +358,14 @@
       button.textContent = '↑ 上传文件';
       button.addEventListener('click', openPicker);
       breadcrumb.after(button);
+    }
+    if (!folderButton) {
+      folderButton = document.createElement('button');
+      folderButton.id = 'catsuki-folder-button';
+      folderButton.type = 'button';
+      folderButton.textContent = '＋ 新建文件夹';
+      folderButton.addEventListener('click', openFolderDialog);
+      button.after(folderButton);
     }
     syncQuota();
   }

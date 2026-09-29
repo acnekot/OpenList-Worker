@@ -15,6 +15,7 @@ test('upload panel shows progress and cancel aborts the current chunk and remain
     after(child) { if (child.id) elements.set(child.id, child) }
     remove() { elements.delete(this.id) }
     setAttribute() {}
+    focus() {}
     click() { this.listeners.click?.() }
   }
   const documentEvents = {}
@@ -23,6 +24,7 @@ test('upload panel shows progress and cancel aborts the current chunk and remain
   const breadcrumb = new Element('nav')
   let activeXhr
   let requests = 0
+  const apiCalls = []
   class FakeXhr {
     constructor() { this.upload = {}; activeXhr = this }
     open() {}
@@ -53,11 +55,17 @@ test('upload panel shows progress and cancel aborts the current chunk and remain
     AbortController,
     DOMException,
     MouseEvent: class {},
-    fetch: async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ code: 200, data: { token: 'session', chunk_size: 8 * 1024 * 1024 } }),
-    }),
+    fetch: async (url, options) => {
+      apiCalls.push({ url, options })
+      if (url.endsWith('/folder_quota')) return {
+        ok: false, status: 404,
+        json: async () => ({ code: 404, message: 'No folder quota' }),
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ code: 200, data: { token: 'session', chunk_size: 8 * 1024 * 1024 } }),
+      }
+    },
   })
   documentEvents.DOMContentLoaded()
   globalEvents.DOMContentLoaded()
@@ -77,4 +85,12 @@ test('upload panel shows progress and cancel aborts the current chunk and remain
   assert.equal(panel.children[0].textContent, '上传已取消')
   assert.equal(requests, 1, 'the queued file must not start')
   assert.equal(panel.children[7].children[1].hidden, false, 'close becomes available')
+
+  elements.get('catsuki-folder-button').click()
+  const dialog = elements.get('catsuki-folder-dialog')
+  assert.ok(dialog)
+  dialog.children[1].value = 'wxb_nb'
+  await dialog.listeners.submit({ preventDefault() {} })
+  assert.ok(apiCalls.some(call => call.url.endsWith('/mkdir') &&
+    JSON.parse(call.options.body).path === '/GoogleDrive2/wxb_nb'))
 })

@@ -40,6 +40,11 @@ const enhancement = `
   #catsuki-upload-button{display:inline-flex;align-self:flex-start;align-items:center;gap:.4rem;margin:.25rem 0 0;padding:.45rem .8rem;border:0;border-radius:.55rem;background:#2684e8;color:white;font:600 .9rem system-ui;cursor:pointer}
   #catsuki-upload-button:hover{background:#1269c3}
   #catsuki-upload-button:focus-visible{outline:2px solid currentColor;outline-offset:2px}
+  #catsuki-folder-button{display:inline-flex;align-self:flex-start;margin:.35rem 0 0;padding:.4rem .75rem;border:1px solid #2684e8;border-radius:.55rem;background:transparent;color:#2684e8;font:600 .85rem system-ui;cursor:pointer}
+  #catsuki-folder-dialog{position:fixed;top:20%;left:50%;transform:translateX(-50%);z-index:10000;display:grid;gap:.65rem;width:min(24rem,calc(100vw - 2rem));padding:1rem;border:1px solid #6b7280;border-radius:.7rem;background:#25292f;color:#fff;box-shadow:0 8px 28px #0008;font:14px system-ui}
+  #catsuki-folder-dialog input{padding:.5rem;border:1px solid #6b7280;border-radius:.4rem;background:#17191c;color:#fff;font:inherit}
+  #catsuki-folder-dialog button{padding:.4rem .75rem;cursor:pointer;border-radius:.4rem;border:1px solid #6b7280;background:#374151;color:#fff}
+  #catsuki-folder-dialog button[type=submit]{background:#2684e8;border-color:#2684e8}
   #catsuki-drive-quota{align-self:flex-start;margin:.4rem 0 .3rem;padding:.55rem .8rem;border-radius:.55rem;background:rgba(38,132,232,.1);font:500 .82rem system-ui;color:inherit}
   .catsuki-upload-icon{display:none!important}
   #catsuki-upload-progress{position:fixed;left:1rem;bottom:1rem;z-index:9999;display:grid;gap:.45rem;width:min(25rem,calc(100vw - 2rem));padding:1rem;border-radius:.7rem;background:#25292f;color:white;box-shadow:0 8px 28px #0008;font:14px system-ui}
