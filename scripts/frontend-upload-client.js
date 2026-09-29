@@ -6,6 +6,8 @@
   input.hidden = true;
   document.addEventListener('DOMContentLoaded', () => document.body.append(input));
   let busy = false;
+  const quotaCache = new Map();
+  const quotaPending = new Set();
 
   const cancelled = () => new DOMException('上传已取消', 'AbortError');
   const formatBytes = value => {
@@ -126,6 +128,59 @@
   function refreshDirectory() {
     const refresh = document.querySelector('.left-toolbar-in [tips="refresh"]');
     refresh?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const mount = currentMount();
+    if (mount) {
+      quotaCache.delete(mount);
+      syncQuota();
+    }
+  }
+
+  function currentMount() {
+    try {
+      const name = decodeURIComponent(location.pathname).split('/').filter(Boolean)[0];
+      return name ? '/' + name : null;
+    }
+    catch { return null; }
+  }
+
+  function quotaText(bytes) {
+    if (bytes === undefined || bytes === null || !/^\d+$/.test(String(bytes))) return null;
+    const value = Number(bytes);
+    return Number.isFinite(value) ? formatBytes(value) : null;
+  }
+
+  function syncQuota() {
+    const button = document.getElementById('catsuki-upload-button');
+    let card = document.getElementById('catsuki-drive-quota');
+    const mount = currentMount();
+    if (!button || !mount) { card?.remove(); return; }
+    if (!card) {
+      card = document.createElement('section');
+      card.id = 'catsuki-drive-quota';
+      card.setAttribute('aria-label', 'Google 云盘容量');
+      button.after(card);
+    }
+    const cached = quotaCache.get(mount);
+    let display = `${mount.slice(1)} 容量 · 正在读取…`;
+    if (cached?.error) display = `${mount.slice(1)} 容量暂不可用`;
+    else if (cached?.data) {
+      const { limit, usage, usageInDrive } = cached.data;
+      const used = quotaText(usage);
+      const total = quotaText(limit);
+      const drive = quotaText(usageInDrive);
+      if (used && total) {
+        const remaining = BigInt(limit) > BigInt(usage) ? quotaText(String(BigInt(limit) - BigInt(usage))) : '0 B';
+        display = `${mount.slice(1)} · 账号已用 ${used} / ${total} · 剩余 ${remaining}`;
+      } else display = `${mount.slice(1)} · 账号已用 ${used || '未知'}`;
+      if (drive) display += ` · 云盘文件已用 ${drive}`;
+    }
+    if (card.textContent !== display) card.textContent = display;
+    if (cached && Date.now() - cached.time < 5 * 60 * 1000 || quotaPending.has(mount)) return;
+    quotaPending.add(mount);
+    api(`google_drive/quota?path=${encodeURIComponent(mount)}`, { headers: apiHeaders() })
+      .then(data => quotaCache.set(mount, { data, time: Date.now() }))
+      .catch(() => quotaCache.set(mount, { error: true, time: Date.now() }))
+      .finally(() => { quotaPending.delete(mount); syncQuota(); });
   }
 
   input.addEventListener('change', async () => {
@@ -230,7 +285,7 @@
     const icon = document.querySelector('.catsuki-upload-icon');
     const breadcrumb = document.querySelector('[aria-label="breadcrumb"]');
     let button = document.getElementById('catsuki-upload-button');
-    if (!icon || !breadcrumb) { button?.remove(); return; }
+    if (!icon || !breadcrumb) { button?.remove(); document.getElementById('catsuki-drive-quota')?.remove(); return; }
     if (!button) {
       button = document.createElement('button');
       button.id = 'catsuki-upload-button';
@@ -239,6 +294,7 @@
       button.addEventListener('click', openPicker);
       breadcrumb.after(button);
     }
+    syncQuota();
   }
   addEventListener('DOMContentLoaded', () => {
     new MutationObserver(syncUploadButton).observe(document.getElementById('root'), { childList: true, subtree: true });

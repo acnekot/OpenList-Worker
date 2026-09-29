@@ -185,6 +185,19 @@ export class GoogleDriveClient {
     return res.json()
   }
 
+  public async getStorageQuota(): Promise<{
+    limit?: string
+    usage?: string
+    usageInDrive?: string
+    usageInDriveTrash?: string
+  }> {
+    const fields = "storageQuota(limit,usage,usageInDrive,usageInDriveTrash)"
+    const about = await this.request<{ storageQuota?: Record<string, string> }>(
+      `${GDRIVE_API}/about?fields=${encodeURIComponent(fields)}`,
+    )
+    return about.storageQuota || {}
+  }
+
   // ===================================================
   // File Operations
   // ===================================================

@@ -152,4 +152,8 @@ export class GoogleDrive implements StorageDriver {
   ): Promise<string> {
     return this.client.startResumableUpload(physicalPath, size, mimeType)
   }
+
+  async getStorageQuota() {
+    return this.client.getStorageQuota()
+  }
 }

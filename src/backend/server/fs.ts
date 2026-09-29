@@ -959,6 +959,30 @@ function googleUploadProgress(res: Response, size: number) {
   throw new Error(`Google Drive upload failed (HTTP ${res.status})`)
 }
 
+fsRouter.get("/google_drive/quota", async (c) => {
+  const user = await getUserFromContext(c)
+  if (!isAdmin(user)) return permissionDenied(c)
+  const path = c.req.query("path")
+  if (!path || !/^\/[A-Za-z0-9_-]+$/.test(path)) {
+    return c.json({ code: 400, message: "Invalid storage path", data: null }, 400)
+  }
+  try {
+    const resolved = await resolvePath(getActualPath(user, path), c.env)
+    if (!resolved.storage || resolved.isVirtual ||
+        ("/" + String(resolved.storage.mount_path || "").replace(/^\/+/, "")) !== path) {
+      return c.json({ code: 404, message: "Storage not found", data: null }, 404)
+    }
+    const driver = await getDriver(resolved.storage.driver, resolved.storage)
+    if (typeof (driver as any).getStorageQuota !== "function") {
+      return c.json({ code: 400, message: "Storage does not report quota", data: null }, 400)
+    }
+    const quota = await (driver as any).getStorageQuota()
+    return c.json({ code: 200, message: "success", data: quota })
+  } catch (e: any) {
+    return c.json({ code: 502, message: safeErrorMessage(e), data: null }, 502)
+  }
+})
+
 fsRouter.post("/google_drive/upload/start", async (c) => {
   const user = await getUserFromContext(c)
   if (!canWrite(user)) return permissionDenied(c)
