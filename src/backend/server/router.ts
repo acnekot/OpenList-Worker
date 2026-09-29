@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
-import { getDb, getKvStatus } from "../internal/model/db"
-import { isServerlessRuntime, NO_STORAGE_MESSAGE } from "../internal/model/store/backend"
+import { getDb } from "../internal/model/db"
+import { getStoreStatus, isServerlessRuntime, NO_STORAGE_MESSAGE } from "../internal/model/store/backend"
 import { fsRouter } from "./fs"
 import {
   authRouter,
@@ -226,11 +226,9 @@ export function setupRouter(app: Hono) {
   // It is kept unchanged because external monitors may already depend on it,
   // but it must never be treated as a health signal.
   //
-  // /healthz exercises the state layer for real: it reads the config through
-  // the same KV path a request would and answers 503 when a configured
-  // persistence layer is failing. "No KV configured" is reported as healthy
-  // with mode="memory" — this covers Vercel, Lambda, and Docker-in-memory
-  // deployments where persistence is intentionally absent.
+  // /healthz reads the config and checks the active persistence driver.
+  // A failing configured backend returns 503. Local in-memory deployments
+  // report mode="memory"; serverless deployments require persistent storage.
   app.get("/healthz", async (c) => {
     const checks: Record<string, any> = {}
     let healthy = true
@@ -247,30 +245,32 @@ export function setupRouter(app: Hono) {
       checks.config = { ok: false, error: err?.message || String(err) }
     }
 
-    let kv: any
+    let store: any
     try {
-      kv = await getKvStatus(c.env)
+      store = await getStoreStatus(c.env)
     } catch (err: any) {
       healthy = false
-      kv = {
-        configured: false,
+      store = {
+        driver: "none",
         connected: false,
         error: err?.message || String(err),
       }
     }
 
+    const configured =
+      !!store?.driver && store.driver !== "none" && store.driver !== "memory"
     checks.persistence = {
-      configured: !!kv?.configured,
-      connected: !!kv?.connected,
-      platform: kv?.platform ?? null,
-      error: kv?.error ?? null,
+      configured,
+      connected: !!(store?.connected ?? store?.available),
+      platform: store?.platform ?? store?.driver ?? null,
+      error: store?.error ?? store?.configError ?? null,
     }
     // Serverless / Worker runtimes must never fall back to memory: instances
     // are multi-tenant and short-lived, so writes silently vanish and users
     // see "saved successfully" for data that does not exist. Report that as
     // unhealthy so monitors and the UI both surface it.
     const serverless = isServerlessRuntime(c.env)
-    if (!kv?.configured) {
+    if (!configured) {
       checks.persistence.mode = serverless ? "unavailable" : "memory"
       if (serverless) {
         checks.persistence.note = NO_STORAGE_MESSAGE
@@ -280,8 +280,8 @@ export function setupRouter(app: Hono) {
           "No persistence configured — changes are ephemeral"
       }
     }
-    // If KV is configured but failing, that's a real outage.
-    if (kv?.configured && !kv?.connected) {
+    // A configured backend that cannot answer its health check is a real outage.
+    if (configured && !(store?.connected ?? store?.available)) {
       healthy = false
     }
 
