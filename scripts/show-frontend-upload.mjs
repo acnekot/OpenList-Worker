@@ -35,8 +35,13 @@ for (const name of fs.readdirSync(path.join(dist, "assets")).filter((name) => /^
 const htmlPath = path.join(dist, "index.html")
 let html = fs.readFileSync(htmlPath, "utf8")
 const clientScript = fs.readFileSync(path.join(root, "scripts", "frontend-upload-client.js"), "utf8")
+const backgroundScript = fs.readFileSync(path.join(root, "scripts", "frontend-background.js"), "utf8")
 const enhancement = `
 <style>
+  #catsuki-background{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;pointer-events:none;z-index:0;opacity:0;transition:opacity .4s ease}
+  #catsuki-background.loaded{opacity:.3}
+  #root{position:relative;z-index:1}
+  @media(prefers-reduced-motion:reduce){#catsuki-background{transition:none}}
   #catsuki-upload-button{display:inline-flex;align-self:flex-start;align-items:center;gap:.4rem;margin:.25rem 0 0;padding:.45rem .8rem;border:0;border-radius:.55rem;background:#2684e8;color:white;font:600 .9rem system-ui;cursor:pointer}
   #catsuki-upload-button:hover{background:#1269c3}
   #catsuki-upload-button:focus-visible{outline:2px solid currentColor;outline-offset:2px}
@@ -57,6 +62,7 @@ const enhancement = `
 </style>
 <script>
 ${clientScript}
+${backgroundScript}
 </script>
 `
 html = html.replace(/<!-- catsuki upload enhancement -->[\s\S]*?<!-- end catsuki upload enhancement -->/, "")
