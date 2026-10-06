@@ -554,7 +554,9 @@ fsRouter.post("/get", async (c) => {
           sign: item.sign || "",
           thumb: (item as any).thumb || "",
           type: item.type ?? 0,
-          raw_url: `/api/sd/${shareId}${subPath}`,
+          // Preview/download clients use this URL directly, including clients
+          // without the frontend's browser-password cookie.
+          raw_url: `/api/sd/${encodeURIComponent(shareId)}${subPath.split("/").map(encodeURIComponent).join("/")}${shareRes.share.pwd ? `?pwd=${encodeURIComponent(shareRes.share.pwd)}` : ""}`,
           readme: shareRes.share.readme || "",
           header: shareRes.share.header || "",
           provider,

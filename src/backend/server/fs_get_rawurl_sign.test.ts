@@ -75,8 +75,34 @@ const appOf = () => {
   const app = new Hono()
   app.route("/api/fs", fsRouter)
   app.route("/api/p", rawRouter)
+  app.route("/api/sd", rawRouter)
   return app
 }
+
+test("password-protected share raw_url downloads anonymously with Range", async () => {
+  const root = makeLocalRoot()
+  const db: any = dbWith(root)
+  db.users = []
+  db.shares = [{ id: "download-test", files: ["/local/a.exe"], pwd: "a+b &?#中文", disabled: false, max_accessed: 0 }]
+  await saveDb(db, {}, { force: true })
+  const app = appOf()
+  const get = await app.request("/api/fs/get", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "/@s/download-test", password: db.shares[0].pwd }),
+  })
+  const body: any = await get.json()
+  assert.equal(body.code, 200)
+  assert.equal(new URL(body.data.raw_url, "http://localhost").searchParams.get("pwd"), db.shares[0].pwd)
+  const download = await app.request(body.data.raw_url)
+  assert.equal(download.status, 200)
+  assert.equal(await download.text(), "MZ")
+  const partial = await app.request(body.data.raw_url, { headers: { Range: "bytes=0-0" } })
+  assert.equal(partial.status, 206)
+  assert.equal(await partial.text(), "M")
+  const denied = await app.request("/api/sd/download-test?pwd=incorrect")
+  assert.notEqual(denied.status, 200)
+  assert.match(await denied.text(), /wrong password/)
+})
 
 const signOf = (rawUrl: string) =>
   new URL(rawUrl, "http://localhost").searchParams.get("sign") || ""

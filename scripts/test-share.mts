@@ -41,7 +41,7 @@ const getRes = await app.request("/api/fs/get", {
   body: JSON.stringify({ path: "/@s/testshare1", password: "1234" }),
 })
 const getJson: any = await getRes.json()
-check("fs/get 单文件分享", getJson.code === 200 && getJson.data?.name === "share-file-test.txt" && getJson.data?.raw_url === "/api/sd/testshare1", `name=${getJson.data?.name}`)
+check("fs/get 单文件分享", getJson.code === 200 && getJson.data?.name === "share-file-test.txt" && getJson.data?.raw_url === "/api/sd/testshare1?pwd=1234", `name=${getJson.data?.name}`)
 
 // 2. Wrong password rejected
 const badPwdRes = await app.request("/api/fs/get", {
@@ -84,7 +84,7 @@ const subJson: any = await subRes.json()
 check("多文件分享子路径", subJson.code === 200 && subJson.data?.name === "share-file-test.txt")
 
 // 7. Download via /sd/ with Range
-const sdRes = await app.request("/api/sd/testshare1?pwd=1234", {
+const sdRes = await app.request(getJson.data.raw_url, {
   method: "GET", headers: { Range: "bytes=0-5" },
 })
 const sdBody = await sdRes.text()
