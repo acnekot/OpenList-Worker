@@ -35,6 +35,7 @@ for (const name of fs.readdirSync(path.join(dist, "assets")).filter((name) => /^
 
 const htmlPath = path.join(dist, "index.html")
 let html = fs.readFileSync(htmlPath, "utf8")
+html = html.replace(/https:\/\/res\.oplist\.org\/logo\/logo\.(?:svg|png)/g, "/catsuki-logo.jpg")
 const clientScript = fs.readFileSync(path.join(root, "scripts", "frontend-upload-client.js"), "utf8")
 const backgroundScript = fs.readFileSync(path.join(root, "scripts", "frontend-background.js"), "utf8")
 const enhancement = `
