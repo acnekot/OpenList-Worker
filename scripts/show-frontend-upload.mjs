@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url"
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const dist = path.join(root, "dist")
+fs.copyFileSync(path.join(root, "scripts/site-assets/catsuki-logo.jpg"), path.join(dist, "catsuki-logo.jpg"))
 const layouts = fs.readdirSync(path.join(dist, "assets")).filter((name) => /^Layout-.*\.js$/.test(name) && !name.includes("legacy"))
 if (layouts.length !== 1) throw new Error(`Expected one modern Layout bundle, found ${layouts.length}`)
 
