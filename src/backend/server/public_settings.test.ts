@@ -22,12 +22,12 @@ test("share copy has a usable template for missing or blank legacy settings", as
     await seed(value === undefined ? [] : [{ key: "share_summary_content", value }])
     const json = await fetchSettings()
     assert.equal(json.data.share_summary_content,
-      "{{base_url}}/s/{{id}}{{#if pwd}}\n分享码：{{pwd}}{{/if}}")
+      "{{base_url}}/@s/{{id}}{{#if pwd}}\n分享码：{{pwd}}{{/if}}")
   }
 })
 
 test("share copy preserves a custom summary template", async () => {
-  const value = "Custom: {{base_url}}/s/{{id}}"
+  const value = "Custom: {{base_url}}/@s/{{id}}"
   await seed([{ key: "share_summary_content", value }])
   assert.equal((await fetchSettings()).data.share_summary_content, value)
 })
