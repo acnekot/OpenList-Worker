@@ -304,7 +304,7 @@ async function proxyUpstream(
   // FIX(H-3): 上游响应头已按白名单回显，但对 Content-Disposition 额外
   // 清洗 CR/LF 与控制字符，防止恶意上游注入额外响应头（Set-Cookie/Location）。
   const contentDisposition = upstreamRes.headers.get("content-disposition")
-  if (contentDisposition) {
+  if (contentDisposition && !c.res.headers.has("Content-Disposition")) {
     c.header(
       "Content-Disposition",
       sanitizeContentDisposition(contentDisposition),
@@ -423,6 +423,15 @@ rawRouter.get("/*", async (c) => {
         return c.text("Cannot download share root", 400)
       }
       reqPath = shareRes.realPath
+      // /sd URLs end in a share ID, so browsers cannot infer the real filename.
+      // Explicit UTF-8 naming also prevents MIME sniffing from replacing a
+      // .unitypackage extension with .gz.
+      const name = reqPath.split("/").pop() || "download"
+      const safeName = name.replace(/[\x00-\x1f\x7f]/g, "_")
+      const asciiName = safeName.replace(/[^\x20-\x7e]|["\\]/g, "_")
+      const encodedName = encodeURIComponent(safeName).replace(/[!'()*]/g,
+        ch => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+      c.header("Content-Disposition", `attachment; filename="${asciiName}"; filename*=UTF-8''${encodedName}`)
     } else {
       // 对齐 Go server/router.go：
       //   r.GET("/d/*path", middlewares.PathParse, middlewares.Down(sign.Verify), ...)
