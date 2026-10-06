@@ -479,6 +479,13 @@ publicRouter.get("/settings", async (c) => {
     }
   })
 
+  // The frontend copies the rendered template verbatim. Older databases seed
+  // an empty template, which reports copy success but clears the clipboard.
+  if (!settingsObj.share_summary_content?.trim()) {
+    settingsObj.share_summary_content =
+      "{{base_url}}/s/{{id}}{{#if pwd}}\n分享码：{{pwd}}{{/if}}"
+  }
+
   // 动态检查是否存在且启用了 guest 账号
   const guest = (db.users || []).find((u: any) => u.username === "guest")
   const isGuestActive = Boolean(guest && !guest.disabled)

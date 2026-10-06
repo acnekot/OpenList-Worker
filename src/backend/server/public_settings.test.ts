@@ -7,7 +7,7 @@ import { publicRouter } from "./public"
 const env: any = {}
 
 const seed = (settings: any[]) =>
-  saveDb({ settings, users: [], storages: [], shares: [] }, env)
+  saveDb({ settings, users: [], storages: [], shares: [] }, env, { force: true })
 
 const fetchSettings = async () => {
   const app = new Hono()
@@ -16,6 +16,21 @@ const fetchSettings = async () => {
   assert.equal(res.status, 200)
   return (await res.json()) as any
 }
+
+test("share copy has a usable template for missing or blank legacy settings", async () => {
+  for (const value of [undefined, "", "  \n "]) {
+    await seed(value === undefined ? [] : [{ key: "share_summary_content", value }])
+    const json = await fetchSettings()
+    assert.equal(json.data.share_summary_content,
+      "{{base_url}}/s/{{id}}{{#if pwd}}\n分享码：{{pwd}}{{/if}}")
+  }
+})
+
+test("share copy preserves a custom summary template", async () => {
+  const value = "Custom: {{base_url}}/s/{{id}}"
+  await seed([{ key: "share_summary_content", value }])
+  assert.equal((await fetchSettings()).data.share_summary_content, value)
+})
 
 test("Security(C-1): /api/public/settings must never echo credential-shaped keys", async () => {
   await seed([
