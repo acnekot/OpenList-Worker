@@ -153,13 +153,19 @@
     let card = document.getElementById('catsuki-drive-quota');
     const mount = currentMount();
     if (!button) { card?.remove(); return; }
+    const folder = quotaCache.get('@folder');
+    // Decide visibility before creating DOM: otherwise the observer repeatedly
+    // creates and removes this card at the unrestricted user's root directory.
+    if (!mount && folder && !folder.data && Date.now() - folder.time < 5 * 60 * 1000) {
+      card?.remove();
+      return;
+    }
     if (!card) {
       card = document.createElement('section');
       card.id = 'catsuki-drive-quota';
       card.setAttribute('aria-label', 'Google 云盘容量');
       (document.getElementById('catsuki-folder-button') || button).after(card);
     }
-    const folder = quotaCache.get('@folder');
     if (!folder || Date.now() - folder.time >= 5 * 60 * 1000) {
       if (card.textContent !== '容量 · 正在读取…') card.textContent = '容量 · 正在读取…';
       if (!quotaPending.has('@folder')) {

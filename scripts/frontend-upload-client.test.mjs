@@ -3,6 +3,43 @@ import fs from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
 
+for (const scoped of [false, true]) test(`root quota observer converges for ${scoped ? 'scoped' : 'admin'} user`, async () => {
+  const elements = new Map()
+  let mutations = 0
+  let observe
+  class Element {
+    addEventListener() {}
+    append() {}
+    setAttribute() {}
+    after(child) { elements.set(child.id, child); mutations++ }
+    remove() { if (elements.delete(this.id)) mutations++ }
+    set textContent(value) { this.text = value; mutations++ }
+    get textContent() { return this.text }
+  }
+  const events = {}
+  const code = fs.readFileSync(new URL('./frontend-upload-client.js', import.meta.url), 'utf8')
+  vm.runInNewContext(code, {
+    document: {
+      createElement: () => new Element(), body: new Element(), addEventListener() {},
+      getElementById: id => elements.get(id), querySelector: () => new Element(),
+    },
+    addEventListener: (name, callback) => { events[name] = callback },
+    MutationObserver: class { constructor(callback) { observe = callback } observe() {} },
+    localStorage: { getItem: () => 'test-token' }, location: { pathname: '/' },
+    fetch: async () => ({ ok: scoped, status: scoped ? 200 : 404,
+      json: async () => scoped ? { code: 200, data: { used: 0, limit: 536870912000 } } : { code: 404 } }),
+  })
+  events.DOMContentLoaded()
+  await new Promise(resolve => setImmediate(resolve))
+  let rounds = 0
+  while (mutations && rounds < 20) { mutations = 0; observe(); rounds++ }
+  assert.equal(mutations, 0, 'DOM observer must settle rather than repeatedly create/remove cards')
+  assert.ok(rounds < 20)
+  const card = elements.get('catsuki-drive-quota')
+  if (scoped) assert.match(card.textContent, /500\.0 GB/)
+  else assert.equal(card, undefined)
+})
+
 test('upload panel shows progress and cancel aborts the current chunk and remaining queue', async () => {
   const elements = new Map()
   class Element {
