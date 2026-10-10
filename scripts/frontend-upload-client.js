@@ -206,10 +206,14 @@
       .finally(() => { quotaPending.delete(mount); syncQuota(); });
   }
 
-  input.addEventListener('change', async () => {
+  input.addEventListener('change', () => {
     const files = Array.from(input.files || []);
     input.value = '';
-    if (!files.length || busy) return;
+    return startUpload(files);
+  });
+
+  async function startUpload(files) {
+    if (!files.length || busy || !document.getElementById('catsuki-upload-button')) return;
     busy = true;
     const directory = decodeURIComponent(location.pathname).replace(/\/$/, '');
     const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
@@ -254,6 +258,7 @@
 
     let finished = 0;
     let finishedBytes = 0;
+    let failed = false;
     const showProgress = (file, sent, state) => {
       if (controller.signal.aborted) return;
       const current = Math.min(file.size, sent);
@@ -286,10 +291,12 @@
       refreshDirectory();
     } catch (error) {
       if (controller.signal.aborted) {
+        failed = true;
         title.textContent = '上传已取消';
         stage.textContent = `已停止剩余文件；${finished} 个文件已完成`;
         rate.textContent = '正在发送的最后一段可能已经到达云盘，请刷新目录确认。';
       } else {
+        failed = true;
         title.textContent = '上传失败';
         stage.textContent = error.message || String(error);
         rate.textContent = `${finished} 个文件已完成`;
@@ -300,7 +307,25 @@
       if (uploadButton) uploadButton.disabled = false;
       cancel.hidden = true;
       close.hidden = false;
+      if (!failed) setTimeout(() => panel.remove(), 8000);
     }
+  }
+
+  addEventListener('beforeunload', event => {
+    if (!busy) return;
+    event.preventDefault();
+    event.returnValue = '';
+  });
+  // Drop files anywhere on a writable folder page to upload them.
+  const hasFiles = event => Array.from(event.dataTransfer?.types || []).includes('Files');
+  document.addEventListener('dragover', event => {
+    if (hasFiles(event) && document.getElementById('catsuki-upload-button')) event.preventDefault();
+  });
+  document.addEventListener('drop', event => {
+    if (!hasFiles(event) || !document.getElementById('catsuki-upload-button')) return;
+    event.preventDefault();
+    // Directories drop as empty entries; only plain files are supported.
+    startUpload(Array.from(event.dataTransfer.files).filter(file => file.size > 0 || file.type));
   });
 
   function openPicker() { if (!busy) input.click(); }
@@ -345,6 +370,7 @@
         confirm.disabled = false;
       }
     });
+    dialog.addEventListener('keydown', event => { if (event.key === 'Escape') dialog.remove(); });
     dialog.append(title, name, error, cancel, confirm);
     document.body.append(dialog);
     name.focus();
@@ -376,7 +402,15 @@
     syncQuota();
   }
   addEventListener('DOMContentLoaded', () => {
-    new MutationObserver(syncUploadButton).observe(document.getElementById('root'), { childList: true, subtree: true });
+    // Large directories mutate the DOM constantly; coalesce into one pass per frame.
+    let queued = false;
+    const schedule = () => {
+      if (typeof requestAnimationFrame !== 'function') return syncUploadButton();
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; syncUploadButton(); });
+    };
+    new MutationObserver(schedule).observe(document.getElementById('root'), { childList: true, subtree: true });
     syncUploadButton();
   });
 })();
