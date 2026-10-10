@@ -5,6 +5,15 @@ import { fileURLToPath } from "node:url"
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const dist = path.join(root, "dist")
 fs.copyFileSync(path.join(root, "scripts/site-assets/catsuki-logo.jpg"), path.join(dist, "catsuki-logo.jpg"))
+// Hashed bundles never change under the same name, so let browsers and edge
+// caches keep them instead of revalidating on every visit.
+fs.writeFileSync(path.join(dist, "_headers"), `/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+/images/*
+  Cache-Control: public, max-age=604800
+/catsuki-logo.jpg
+  Cache-Control: public, max-age=86400
+`)
 const layouts = fs.readdirSync(path.join(dist, "assets")).filter((name) => /^Layout-.*\.js$/.test(name) && !name.includes("legacy"))
 if (layouts.length !== 1) throw new Error(`Expected one modern Layout bundle, found ${layouts.length}`)
 
