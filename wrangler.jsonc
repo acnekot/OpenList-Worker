@@ -30,7 +30,9 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [
-    { "pattern": "gcloud.catsuki.cc", "custom_domain": true }
+    { "pattern": "gcloud.catsuki.cc", "custom_domain": true },
+    // Backup entry: DNS-only record lets us choose Cloudflare edge IPs per carrier.
+    { "pattern": "fast.catsuki.cc/*", "zone_name": "catsuki.cc" }
   ],
 
   // ⚠️ run_worker_first 只放行 HTML 入口，不能改成 true（全量放行）：
