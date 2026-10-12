@@ -38,11 +38,13 @@ const normalize = (p: string) => {
  * Resolve a share request path.
  * @param reqPath e.g. `/@s/abc`, `/@s/abc/sub`, or `/abc/sub` (already stripped /sd)
  * @param password share password from frontend ("" if none)
+ * @param options.countAccess increment `accessed`; only a download start sets it
  */
 export async function resolveShare(
   reqPath: string,
   password: string,
   envCtx?: any,
+  options: { countAccess?: boolean } = {},
 ): Promise<ShareResolveResult> {
   const clean = normalize(reqPath)
   const parts = clean.split("/").filter(Boolean)
@@ -83,9 +85,12 @@ export async function resolveShare(
     return { ok: false, error: "share is empty" }
   }
 
-  // Count this access
-  share.accessed = (share.accessed || 0) + 1
-  saveDb(db, envCtx).catch(() => {})
+  // Only a download start consumes quota; browsing, previews and resumed
+  // range requests are free (the limit above is still enforced for all).
+  if (options.countAccess) {
+    share.accessed = (share.accessed || 0) + 1
+    saveDb(db, envCtx).catch(() => {})
+  }
 
   // Multi-file share root → virtual list
   if (share.files.length > 1 && rest.length === 0) {

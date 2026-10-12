@@ -196,3 +196,27 @@ test("cleanup", () => {
     } catch {}
   }
 })
+
+test("share access count: only a download start consumes quota", async () => {
+  const root = makeLocalRoot()
+  const db: any = dbWith(root)
+  db.users = []
+  db.shares = [{ id: "count-test", files: ["/local/a.exe"], pwd: "", disabled: false, max_accessed: 1, accessed: 0 }]
+  await saveDb(db, {}, { force: true })
+  const app = appOf()
+  const get = () => app.request("/api/fs/get", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "/@s/count-test", password: "" }),
+  })
+  // Browsing, HEAD and resumed ranges are free.
+  for (let i = 0; i < 3; i++) assert.equal(((await (await get()).json()) as any).code, 200)
+  assert.equal((await app.request("/api/sd/count-test", { method: "HEAD" })).status, 200)
+  assert.equal((await app.request("/api/sd/count-test", { headers: { Range: "bytes=1-1" } })).status, 206)
+  assert.equal((await get()).status, 200)
+  // The first full download uses the single allowed access.
+  assert.equal((await app.request("/api/sd/count-test")).status, 200)
+  await new Promise((r) => setTimeout(r, 20))
+  const after = await app.request("/api/sd/count-test")
+  assert.equal(after.status, 404)
+  assert.match(await after.text(), /access count exceeded/)
+})
