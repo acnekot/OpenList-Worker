@@ -34,6 +34,29 @@ const normalize = (p: string) => {
   return "/" + stack.join("/")
 }
 
+// A bounded range this small is a size probe (players ask for bytes=0-1),
+// not the start of a download.
+const PROBE_BYTES = 64 * 1024
+
+/**
+ * Does this request start a download of the shared file? Only these consume a
+ * share's access count: a plain GET, or a ranged GET that begins at byte 0.
+ * HEAD, size probes and resumed ranges (bytes=N- with N > 0) are free. A
+ * complete file always needs its first byte, so a multi-connection downloader
+ * still pays once, while a resumed download does not pay again.
+ */
+export function isShareDownloadStart(
+  method: string,
+  range?: string | null,
+): boolean {
+  if (method !== "GET") return false
+  const header = (range || "").trim()
+  if (!header) return true
+  const match = /^bytes=0-(\d*)$/i.exec(header)
+  if (!match) return false
+  return match[1] === "" || Number(match[1]) + 1 > PROBE_BYTES
+}
+
 /**
  * Resolve a share request path.
  * @param reqPath e.g. `/@s/abc`, `/@s/abc/sub`, or `/abc/sub` (already stripped /sd)
@@ -89,7 +112,10 @@ export async function resolveShare(
   // range requests are free (the limit above is still enforced for all).
   if (options.countAccess) {
     share.accessed = (share.accessed || 0) + 1
-    saveDb(db, envCtx).catch(() => {})
+    // Awaited so the count survives the Worker finishing a short response.
+    try {
+      await saveDb(db, envCtx)
+    } catch {}
   }
 
   // Multi-file share root → virtual list

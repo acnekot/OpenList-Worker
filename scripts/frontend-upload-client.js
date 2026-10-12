@@ -97,6 +97,23 @@
       body: JSON.stringify({ path, size: file.size, mime_type: file.type || 'application/octet-stream' }),
       signal,
     });
+    try {
+      await sendInChunks(session, file, signal, update);
+    } catch (error) {
+      abandonSession(session);
+      throw error;
+    }
+  }
+
+  // Best effort: hands the quota back and lets Google drop the session at once.
+  function abandonSession(session) {
+    fetch('/api/fs/google_drive/upload/cancel', {
+      method: 'POST',
+      headers: apiHeaders({ 'X-Google-Upload-Token': session.token }),
+    }).catch(() => {});
+  }
+
+  async function sendInChunks(session, file, signal, update) {
     let offset = 0;
     while (offset < file.size) {
       if (signal.aborted) throw cancelled();
@@ -110,6 +127,8 @@
             'Content-Type': 'application/octet-stream',
           }), file.slice(offset, end), signal, sent => update(offset + sent, '正在传输'));
           if (result.next_offset <= offset) throw new Error('上传进度未前进');
+          // Each accepted chunk renews the session token, so slow uploads can run for days.
+          if (result.token) session.token = result.token;
           offset = result.next_offset;
           update(offset, '已传至 Google Drive');
           completed = result.complete;
@@ -117,7 +136,7 @@
         } catch (error) {
           if (signal.aborted) throw cancelled();
           if (attempt === CHUNK_ATTEMPTS - 1 || !retryable(error)) throw error;
-          update(offset, '正在恢复连接');
+          update(offset, `正在恢复连接（第 ${attempt + 1}/${CHUNK_ATTEMPTS - 1} 次重试）`);
           await pause(Math.min(500 * 2 ** attempt, 5000), signal);
           let status;
           try {
@@ -130,6 +149,7 @@
             if (!retryable(statusError)) throw statusError;
             continue;
           }
+          if (status.token) session.token = status.token;
           if (status.complete) { offset = file.size; completed = true; break; }
           if (status.next_offset > offset) {
             offset = status.next_offset;

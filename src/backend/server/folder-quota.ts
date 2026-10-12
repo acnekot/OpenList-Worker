@@ -4,6 +4,11 @@ import type { UserPermissionObj } from "../pkg/permission"
 
 type QuotaPolicy = { base_path: string; limit_bytes: number }
 
+// An unfinished upload holds its bytes for this long after its last activity.
+// Upload tokens expire sooner (see GOOGLE_SESSION_IDLE_MS in fs.ts), and every
+// accepted chunk pushes both deadlines forward, so only idle uploads time out.
+export const RESERVATION_IDLE_MS = 7 * 60 * 60 * 1000
+
 function policies(env: any): Record<string, QuotaPolicy> {
   try {
     return JSON.parse(String(env?.USER_FOLDER_QUOTAS || "{}"))
@@ -79,7 +84,7 @@ export async function reserveFolderQuota(
         (completed_at IS NULL AND expires_at > ?) OR completed_at > ?
       )
     ), 0) <= ?
-  `).bind(id, user.username, bytes, now + 7 * 60 * 60 * 1000,
+  `).bind(id, user.username, bytes, now + RESERVATION_IDLE_MS,
     used, bytes, user.username, now, scannedAt - 60_000, policy.limit_bytes).run()
   if (result.meta?.changes !== 1) throw new Error("此用户的 500 GiB 文件夹容量不足")
   return id
@@ -90,6 +95,14 @@ export async function completeFolderQuotaReservation(env: any, id: string | null
   await database(env).prepare(
     "UPDATE user_quota_reservations SET completed_at = ? WHERE id = ? AND completed_at IS NULL",
   ).bind(Date.now(), id).run()
+}
+
+export async function extendFolderQuotaReservation(env: any, id: string | null | undefined) {
+  if (!id) return
+  const expiresAt = Date.now() + RESERVATION_IDLE_MS
+  await database(env).prepare(
+    "UPDATE user_quota_reservations SET expires_at = ? WHERE id = ? AND completed_at IS NULL AND expires_at < ?",
+  ).bind(expiresAt, id, expiresAt).run()
 }
 
 export async function releaseFolderQuotaReservation(env: any, id: string | null | undefined) {

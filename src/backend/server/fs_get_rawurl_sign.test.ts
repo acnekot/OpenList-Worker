@@ -212,6 +212,7 @@ test("share access count: only a download start consumes quota", async () => {
   for (let i = 0; i < 3; i++) assert.equal(((await (await get()).json()) as any).code, 200)
   assert.equal((await app.request("/api/sd/count-test", { method: "HEAD" })).status, 200)
   assert.equal((await app.request("/api/sd/count-test", { headers: { Range: "bytes=1-1" } })).status, 206)
+  assert.equal((await app.request("/api/sd/count-test", { headers: { Range: "bytes=0-0" } })).status, 206, "size probes are free")
   assert.equal((await get()).status, 200)
   // The first full download uses the single allowed access.
   assert.equal((await app.request("/api/sd/count-test")).status, 200)

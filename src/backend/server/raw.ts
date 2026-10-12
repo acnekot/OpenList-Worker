@@ -2,7 +2,7 @@ import { Hono } from "hono"
 import { getSettings, resolvePath } from "../internal/model/db"
 import { parseRangeHeader } from "../internal/stream/stream"
 import { flushPendingDriverState, getDriver } from "../internal/op/storage"
-import { resolveShare } from "../internal/op/share"
+import { isShareDownloadStart, resolveShare } from "../internal/op/share"
 import {
   needDownloadSign,
   verifyDownloadSign,
@@ -415,12 +415,8 @@ rawRouter.get("/*", async (c) => {
         cookiePwd = cookiePwdRaw
       }
       const sharePwd = c.req.query("pwd") || cookiePwd
-      const rangeHeader = c.req.header("range") || ""
-      const startsDownload =
-        c.req.method === "GET" &&
-        (!rangeHeader || /^bytes=0-$/.test(rangeHeader.trim()))
       const shareRes = await resolveShare(reqPath, sharePwd, c.env, {
-        countAccess: startsDownload,
+        countAccess: isShareDownloadStart(c.req.method, c.req.header("range")),
       })
       if (!shareRes.ok) {
         return c.text(shareRes.error || "Share not found", 404)

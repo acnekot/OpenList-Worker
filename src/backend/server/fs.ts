@@ -44,6 +44,7 @@ import { seedRouter } from "./seed"
 import {
   activeFolderQuotaReservation,
   completeFolderQuotaReservation,
+  extendFolderQuotaReservation,
   folderQuotaPolicy,
   folderQuotaStatus,
   releaseFolderQuotaReservation,
@@ -88,7 +89,7 @@ fsRouter.use("*", async (c, next) => {
       "/dirs", "/list", "/get", "/search", "/mkdir", "/rename", "/remove",
       "/move", "/batch_rename", "/regex_rename", "/recursive_move",
       "/remove_empty_directory", "/archive/meta", "/archive/list",
-      "/google_drive/upload/start",
+      "/google_drive/upload/start", "/google_drive/upload/cancel",
     ])
     const safePuts = new Set(["/put", "/form", "/google_drive/upload/chunk"])
     if (!(c.req.method === "POST" && safePosts.has(c.req.path.replace(/^\/api\/fs/, ""))) &&
@@ -946,6 +947,9 @@ type GoogleUploadGrant = {
   expires: number
   reservationId?: string
 }
+// A token is good for this long after the last accepted chunk. Every chunk and
+// status answer carries a fresh token, so only an idle upload can expire.
+const GOOGLE_SESSION_IDLE_MS = 6 * 60 * 60 * 1000
 
 async function uploadSigningKey(c: any): Promise<CryptoKey> {
   return crypto.subtle.importKey(
@@ -996,15 +1000,108 @@ async function readGoogleUploadGrant(c: any, userId: number): Promise<GoogleUplo
   }
 }
 
-function googleUploadProgress(res: Response, size: number) {
+class GoogleUploadError extends Error {
+  constructor(message: string, readonly httpStatus: number) {
+    super(message)
+  }
+}
+
+// Permanent Google answers (full Drive, lost session) map to a 4xx so the
+// browser stops retrying; throttling and 5xx map to 502/503 and are retried.
+async function googleUploadFailure(res: Response): Promise<GoogleUploadError> {
+  let reason = ""
+  try {
+    const body: any = await res.json()
+    reason = String(body?.error?.errors?.[0]?.reason || body?.error?.status || "")
+  } catch {}
+  if (reason === "storageQuotaExceeded") {
+    return new GoogleUploadError("Google 账号存储空间已满，请清理空间后重试", 403)
+  }
+  if (reason === "dailyLimitExceeded") {
+    return new GoogleUploadError("已达到 Google Drive 每日上传上限，请稍后再试", 403)
+  }
+  if (res.status === 429 || reason === "rateLimitExceeded" || reason === "userRateLimitExceeded") {
+    return new GoogleUploadError("Google Drive 请求过于频繁，正在重试", 503)
+  }
+  if (res.status >= 500) {
+    return new GoogleUploadError(`Google Drive 暂时不可用 (HTTP ${res.status})`, 502)
+  }
+  if (res.status === 404 || res.status === 410) {
+    return new GoogleUploadError("Google Drive 上传会话已失效，请重新上传", 410)
+  }
+  return new GoogleUploadError(`Google Drive 拒绝了上传 (HTTP ${res.status})`, 422)
+}
+
+function googleUploadErrorResponse(c: any, e: any) {
+  const status = e instanceof GoogleUploadError ? e.httpStatus : 502
+  return c.json({ code: status, message: safeErrorMessage(e), data: null }, status as any)
+}
+
+async function googleUploadProgress(res: Response, size: number) {
   if (res.ok) return { complete: true, next_offset: size }
   if (res.status === 308) {
     const range = res.headers.get("Range") || ""
     const match = /^bytes=0-(\d+)$/.exec(range)
     return { complete: false, next_offset: match ? Number(match[1]) + 1 : 0 }
   }
-  throw new Error(`Google Drive upload failed (HTTP ${res.status})`)
+  throw await googleUploadFailure(res)
 }
+
+// Accepted progress renews the upload token and its quota reservation.
+async function renewedGoogleUpload(c: any, grant: GoogleUploadGrant) {
+  await extendFolderQuotaReservation(c.env, grant.reservationId)
+  return signGoogleUpload(c, { ...grant, expires: Date.now() + GOOGLE_SESSION_IDLE_MS })
+}
+
+// Reads a request body into one buffer. With a trustworthy Content-Length the
+// buffer is allocated once and filled in place, instead of keeping every
+// network fragment and copying them again to concatenate.
+export async function readBoundedBody(
+  stream: ReadableStream<Uint8Array>,
+  limit: number,
+  declared: number,
+): Promise<Uint8Array<ArrayBuffer> | null> {
+  const reader = stream.getReader()
+  const known = Number.isSafeInteger(declared) && declared > 0 && declared <= limit
+  const buffer = known ? new Uint8Array(declared) : null
+  const parts: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (total + value.byteLength > (known ? declared : limit)) {
+      await reader.cancel()
+      return null
+    }
+    if (buffer) buffer.set(value, total)
+    else parts.push(value)
+    total += value.byteLength
+  }
+  if (buffer) return total === declared ? buffer : buffer.subarray(0, total)
+  const out = new Uint8Array(total)
+  let at = 0
+  for (const part of parts) {
+    out.set(part, at)
+    at += part.byteLength
+  }
+  return out
+}
+
+// Bytes left in the Google account, or null when it is unlimited or unknown.
+export async function googleFreeSpace(driver: any): Promise<number | null> {
+  if (typeof driver.getStorageQuota !== "function") return null
+  try {
+    const quota = await driver.getStorageQuota()
+    const limit = Number(quota.limit)
+    const usage = Number(quota.usage)
+    if (Number.isFinite(limit) && limit > 0 && Number.isFinite(usage)) {
+      return Math.max(0, limit - usage)
+    }
+  } catch {}
+  return null
+}
+
+const formatGiB = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(bytes >= 10 * 1024 ** 3 ? 1 : 2)} GB`
 
 fsRouter.get("/google_drive/quota", async (c) => {
   const user = await getUserFromContext(c)
@@ -1069,11 +1166,20 @@ fsRouter.post("/google_drive/upload/start", async (c) => {
     if (typeof (driver as any).startResumableUpload !== "function") {
       return c.json({ code: 400, message: "Storage does not support large uploads", data: null }, 400)
     }
+    // Fail now, with a readable reason, instead of after hours of uploading.
+    const free = await googleFreeSpace(driver)
+    if (free !== null && size > free) {
+      return c.json({
+        code: 400,
+        message: `Google 账号剩余空间不足：文件 ${formatGiB(size)}，仅剩 ${formatGiB(free)}`,
+        data: null,
+      }, 400)
+    }
     reservation = await reserveFolderQuota(user!, c.env, size)
     const url = await (driver as any).startResumableUpload(resolved.physical!, size, mimeType)
     const token = await signGoogleUpload(c, {
       url, size, path: reqPath, userId: user!.id || 0,
-      expires: Date.now() + 24 * 60 * 60 * 1000,
+      expires: Date.now() + GOOGLE_SESSION_IDLE_MS,
       ...(reservation ? { reservationId: reservation } : {}),
     })
     return c.json({ code: 200, message: "success", data: { token, chunk_size: GOOGLE_CHUNK_SIZE } })
@@ -1102,20 +1208,10 @@ fsRouter.put("/google_drive/upload/chunk", async (c) => {
   if (length > GOOGLE_CHUNK_SIZE) {
     return c.json({ code: 413, message: "Chunk exceeds 8 MiB", data: null }, 413)
   }
-  const reader = c.req.raw.body?.getReader()
-  if (!reader) return c.json({ code: 400, message: "Missing chunk body", data: null }, 400)
-  const parts: Uint8Array[] = []
-  let total = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    total += value.byteLength
-    if (total > GOOGLE_CHUNK_SIZE) {
-      await reader.cancel()
-      return c.json({ code: 413, message: "Chunk exceeds 8 MiB", data: null }, 413)
-    }
-    parts.push(value)
-  }
+  if (!c.req.raw.body) return c.json({ code: 400, message: "Missing chunk body", data: null }, 400)
+  const body = await readBoundedBody(c.req.raw.body, GOOGLE_CHUNK_SIZE, length)
+  if (!body) return c.json({ code: 413, message: "Chunk exceeds 8 MiB", data: null }, 413)
+  const total = body.byteLength
   if (total === 0 || offset + total > grant.size ||
       (offset + total < grant.size && total % (256 * 1024) !== 0)) {
     return c.json({ code: 400, message: "Invalid chunk size", data: null }, 400)
@@ -1128,13 +1224,19 @@ fsRouter.put("/google_drive/upload/chunk", async (c) => {
         "Content-Range": `bytes ${offset}-${offset + total - 1}/${grant.size}`,
         "Content-Type": "application/octet-stream",
       },
-      body: Buffer.concat(parts.map((part) => Buffer.from(part)), total),
+      body,
     })
-    const progress = googleUploadProgress(res, grant.size)
-    if (progress.complete) await completeFolderQuotaReservation(c.env, grant.reservationId)
-    return c.json({ code: 200, message: "success", data: progress })
+    const progress = await googleUploadProgress(res, grant.size)
+    if (progress.complete) {
+      await completeFolderQuotaReservation(c.env, grant.reservationId)
+      return c.json({ code: 200, message: "success", data: progress })
+    }
+    return c.json({
+      code: 200, message: "success",
+      data: { ...progress, token: await renewedGoogleUpload(c, grant) },
+    })
   } catch (e: any) {
-    return c.json({ code: 502, message: safeErrorMessage(e), data: null }, 502)
+    return googleUploadErrorResponse(c, e)
   }
 })
 
@@ -1155,12 +1257,30 @@ fsRouter.get("/google_drive/upload/status", async (c) => {
       redirect: "manual",
       headers: { "Content-Range": `bytes */${grant.size}` },
     })
-    const progress = googleUploadProgress(res, grant.size)
-    if (progress.complete) await completeFolderQuotaReservation(c.env, grant.reservationId)
-    return c.json({ code: 200, message: "success", data: progress })
+    const progress = await googleUploadProgress(res, grant.size)
+    if (progress.complete) {
+      await completeFolderQuotaReservation(c.env, grant.reservationId)
+      return c.json({ code: 200, message: "success", data: progress })
+    }
+    return c.json({
+      code: 200, message: "success",
+      data: { ...progress, token: await renewedGoogleUpload(c, grant) },
+    })
   } catch (e: any) {
-    return c.json({ code: 502, message: safeErrorMessage(e), data: null }, 502)
+    return googleUploadErrorResponse(c, e)
   }
+})
+
+// A cancelled or failed upload gives its quota back at once and tells Google
+// to drop the session, instead of holding the bytes until the idle timeout.
+fsRouter.post("/google_drive/upload/cancel", async (c) => {
+  const user = await getUserFromContext(c)
+  if (!canWrite(user)) return permissionDenied(c)
+  const grant = await readGoogleUploadGrant(c, user!.id || 0)
+  if (!grant) return c.json({ code: 403, message: "Invalid upload session", data: null }, 403)
+  try { await fetch(grant.url, { method: "DELETE", redirect: "manual" }) } catch {}
+  try { await releaseFolderQuotaReservation(c.env, grant.reservationId) } catch {}
+  return c.json({ code: 200, message: "success", data: null })
 })
 
 // ---- 分片会话上传：解决大文件整体缓冲导致的卡死/OOM ----
