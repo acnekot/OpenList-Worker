@@ -49,26 +49,27 @@ const clientScript = fs.readFileSync(path.join(root, "scripts", "frontend-upload
 const backgroundScript = fs.readFileSync(path.join(root, "scripts", "frontend-background.js"), "utf8")
 const enhancement = `
 <style>
+  :root{--cs-brand:#2684e8;--cs-brand-hover:#1269c3;--cs-border:#6b7280;--cs-surface-100:#17191c;--cs-surface-200:#25292f;--cs-brand-wash:rgba(38,132,232,.1);--cs-shadow-dialog:0 8px 28px #0008}
   #catsuki-background{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;pointer-events:none;z-index:0;opacity:0;transition:opacity .4s ease}
   #catsuki-background.loaded{opacity:.3}
   #root{position:relative;z-index:1}
   @media(prefers-reduced-motion:reduce){#catsuki-background{transition:none}}
-  #catsuki-upload-button{display:inline-flex;align-self:flex-start;align-items:center;gap:.4rem;margin:.25rem 0 0;padding:.45rem .8rem;border:0;border-radius:.55rem;background:#2684e8;color:white;font:600 .9rem system-ui;cursor:pointer}
-  #catsuki-upload-button:hover{background:#1269c3}
+  #catsuki-upload-button{display:inline-flex;align-self:flex-start;align-items:center;gap:.4rem;margin:.25rem 0 0;padding:.45rem .8rem;border:0;border-radius:.55rem;background:var(--cs-brand);color:white;font:600 .9rem system-ui;cursor:pointer}
+  #catsuki-upload-button:hover{background:var(--cs-brand-hover)}
   #catsuki-upload-button:focus-visible{outline:2px solid currentColor;outline-offset:2px}
-  #catsuki-folder-button{display:inline-flex;align-self:flex-start;margin:.35rem 0 0;padding:.4rem .75rem;border:1px solid #2684e8;border-radius:.55rem;background:transparent;color:#2684e8;font:600 .85rem system-ui;cursor:pointer}
-  #catsuki-folder-dialog{position:fixed;top:20%;left:50%;transform:translateX(-50%);z-index:10000;display:grid;gap:.65rem;width:min(24rem,calc(100vw - 2rem));padding:1rem;border:1px solid #6b7280;border-radius:.7rem;background:#25292f;color:#fff;box-shadow:0 8px 28px #0008;font:14px system-ui}
-  #catsuki-folder-dialog input{padding:.5rem;border:1px solid #6b7280;border-radius:.4rem;background:#17191c;color:#fff;font:inherit}
-  #catsuki-folder-dialog button{padding:.4rem .75rem;cursor:pointer;border-radius:.4rem;border:1px solid #6b7280;background:#374151;color:#fff}
-  #catsuki-folder-dialog button[type=submit]{background:#2684e8;border-color:#2684e8}
-  #catsuki-drive-quota{align-self:flex-start;margin:.4rem 0 .3rem;padding:.55rem .8rem;border-radius:.55rem;background:rgba(38,132,232,.1);font:500 .82rem system-ui;color:inherit}
+  #catsuki-folder-button{display:inline-flex;align-self:flex-start;margin:.35rem 0 0;padding:.4rem .75rem;border:1px solid var(--cs-brand);border-radius:.55rem;background:transparent;color:var(--cs-brand);font:600 .85rem system-ui;cursor:pointer}
+  #catsuki-folder-dialog{position:fixed;top:20%;left:50%;transform:translateX(-50%);z-index:10000;display:grid;gap:.65rem;width:min(24rem,calc(100vw - 2rem));padding:1rem;border:1px solid var(--cs-border);border-radius:.7rem;background:var(--cs-surface-200);color:#fff;box-shadow:var(--cs-shadow-dialog);font:14px system-ui}
+  #catsuki-folder-dialog input{padding:.5rem;border:1px solid var(--cs-border);border-radius:.4rem;background:var(--cs-surface-100);color:#fff;font:inherit}
+  #catsuki-folder-dialog button{padding:.4rem .75rem;cursor:pointer;border-radius:.4rem;border:1px solid var(--cs-border);background:#374151;color:#fff}
+  #catsuki-folder-dialog button[type=submit]{background:var(--cs-brand);border-color:var(--cs-brand)}
+  #catsuki-drive-quota{align-self:flex-start;margin:.4rem 0 .3rem;padding:.55rem .8rem;border-radius:.55rem;background:var(--cs-brand-wash);font:500 .82rem system-ui;color:inherit}
   .catsuki-upload-icon{display:none!important}
-  #catsuki-upload-progress{position:fixed;left:1rem;bottom:1rem;z-index:9999;display:grid;gap:.45rem;width:min(25rem,calc(100vw - 2rem));padding:1rem;border-radius:.7rem;background:#25292f;color:white;box-shadow:0 8px 28px #0008;font:14px system-ui}
+  #catsuki-upload-progress{position:fixed;left:1rem;bottom:1rem;z-index:9999;display:grid;gap:.45rem;width:min(25rem,calc(100vw - 2rem));padding:1rem;border-radius:.7rem;background:var(--cs-surface-200);color:white;box-shadow:var(--cs-shadow-dialog);font:14px system-ui}
   #catsuki-upload-progress strong{font-size:1rem}
   #catsuki-upload-progress .catsuki-upload-name{font-weight:600;overflow-wrap:anywhere}
   #catsuki-upload-progress .catsuki-upload-actions{display:flex;justify-content:flex-end;gap:.5rem;margin-top:.25rem}
   #catsuki-upload-progress progress{width:100%}
-  #catsuki-upload-progress button{padding:.4rem .75rem;cursor:pointer;border-radius:.4rem;border:1px solid #6b7280;background:#374151;color:white}
+  #catsuki-upload-progress button{padding:.4rem .75rem;cursor:pointer;border-radius:.4rem;border:1px solid var(--cs-border);background:#374151;color:white}
   #catsuki-upload-progress button:disabled{opacity:.55;cursor:wait}
 </style>
 <script>
