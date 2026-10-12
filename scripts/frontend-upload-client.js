@@ -1,6 +1,17 @@
 (() => {
   const SMALL_FILE = 8 * 1024 * 1024;
-  const CHUNK_ATTEMPTS = 8;
+  // Transfer tuning. A request that makes no progress is abandoned and retried,
+  // so a dead connection can never leave the panel hanging.
+  const STALL_MS = 45 * 1000; // no upload progress at all: the connection is dead
+  const RESPONSE_MS = 90 * 1000; // body sent, waiting for the Worker to finish with Google
+  const API_TIMEOUT_MS = 30 * 1000;
+  const START_TIMEOUT_MS = 120 * 1000; // the Worker may scan a large quota folder first
+  const RETRY_WAITS = [1000, 2000, 4000, 10000, 20000, 25000]; // the last wait repeats
+  const PATIENCE_MS = 10 * 60 * 1000; // stop after this long without progress, keeping the session
+  const CHUNK_UNIT = 256 * 1024; // Google needs non-final chunks in multiples of this
+  const MIN_CHUNK = 1024 * 1024;
+  const RESUME_KEY = 'catsuki-upload-sessions';
+  const RESUME_TTL = 5 * 60 * 60 * 1000; // sessions renew while uploading and lapse after 6 h idle
   // Permission, quota and bad-request answers will not change on retry.
   const retryable = error => !error.status || error.status >= 500 || error.status === 408 || error.status === 429;
   const pause = (ms, signal) => new Promise((resolve, reject) => {
@@ -9,6 +20,38 @@
     const onAbort = () => { clearTimeout(timer); reject(cancelled()); };
     signal.addEventListener('abort', onAbort, { once: true });
   });
+
+  // An interrupted large upload can be picked up again: the browser remembers
+  // Google's session token for each file, and choosing the same file resumes it.
+  function loadResumes() {
+    try {
+      const all = JSON.parse(localStorage.getItem(RESUME_KEY) || '{}');
+      return all && typeof all === 'object' && !Array.isArray(all) ? all : {};
+    } catch { return {}; }
+  }
+  function saveResume(key, session) {
+    try {
+      const all = loadResumes();
+      all[key] = { token: session.token, chunk_size: session.chunk_size, at: Date.now() };
+      for (const [name, entry] of Object.entries(all)) {
+        if (!entry || Date.now() - entry.at > RESUME_TTL) delete all[name];
+      }
+      localStorage.setItem(RESUME_KEY, JSON.stringify(all));
+    } catch {}
+  }
+  function clearResume(key) {
+    try {
+      const all = loadResumes();
+      if (key in all) {
+        delete all[key];
+        localStorage.setItem(RESUME_KEY, JSON.stringify(all));
+      }
+    } catch {}
+  }
+  function savedResume(key) {
+    const entry = loadResumes()[key];
+    return entry && typeof entry.token === 'string' && Date.now() - entry.at <= RESUME_TTL ? entry : null;
+  }
   const input = document.createElement('input');
   input.type = 'file';
   input.multiple = true;
@@ -38,27 +81,58 @@
     return { Authorization: localStorage.getItem('token') || '', ...extra };
   }
 
-  async function api(url, options = {}) {
-    const response = await fetch('/api/fs/' + url, options);
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.code !== 200) {
-      const error = new Error(data.message || `上传失败 (HTTP ${response.status})`);
-      error.status = response.status;
+  async function api(url, options = {}, timeoutMs = API_TIMEOUT_MS) {
+    const parent = options.signal;
+    if (parent && parent.aborted) throw cancelled();
+    const controller = new AbortController();
+    const onParentAbort = () => controller.abort();
+    if (parent) parent.addEventListener('abort', onParentAbort, { once: true });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    try {
+      const response = await fetch('/api/fs/' + url, { ...options, signal: controller.signal });
+      const data = await response.json().catch(() => ({}));
+      if (timedOut) throw new Error('服务器响应超时');
+      if (!response.ok || data.code !== 200) {
+        const error = new Error(data.message || `上传失败 (HTTP ${response.status})`);
+        error.status = response.status;
+        throw error;
+      }
+      return data.data;
+    } catch (error) {
+      if (timedOut && !(parent && parent.aborted)) throw new Error('服务器响应超时');
       throw error;
+    } finally {
+      clearTimeout(timer);
+      if (parent) parent.removeEventListener('abort', onParentAbort);
     }
-    return data.data;
   }
 
   // XHR exposes upload progress and aborts the current request immediately.
+  // A watchdog also aborts it when the connection stops moving: browsers set no
+  // timeout of their own, so a black-holed request would otherwise hang forever.
   function sendFile(url, headers, body, signal, onProgress) {
     return new Promise((resolve, reject) => {
       if (signal.aborted) return reject(cancelled());
       const xhr = new XMLHttpRequest();
+      let watchdog;
+      let stalled = false;
+      const arm = ms => {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(() => { stalled = true; xhr.abort(); }, ms);
+      };
       const abort = () => xhr.abort();
-      const cleanup = () => signal.removeEventListener('abort', abort);
+      const cleanup = () => {
+        clearTimeout(watchdog);
+        signal.removeEventListener('abort', abort);
+      };
       xhr.open('PUT', '/api/fs/' + url);
       for (const [key, value] of Object.entries(headers)) xhr.setRequestHeader(key, value);
-      xhr.upload.onprogress = event => onProgress(Math.min(event.loaded, body.size));
+      xhr.upload.onprogress = event => {
+        arm(STALL_MS);
+        onProgress(Math.min(event.loaded, body.size));
+      };
+      xhr.upload.onload = () => arm(RESPONSE_MS);
       xhr.onload = () => {
         cleanup();
         let data;
@@ -71,9 +145,13 @@
         }
       };
       xhr.onerror = () => { cleanup(); reject(new Error('网络连接中断')); };
-      xhr.onabort = () => { cleanup(); reject(cancelled()); };
+      xhr.onabort = () => {
+        cleanup();
+        reject(stalled && !signal.aborted ? new Error('连接没有响应') : cancelled());
+      };
       signal.addEventListener('abort', abort, { once: true });
       if (signal.aborted) return abort();
+      arm(STALL_MS);
       xhr.send(body);
     });
   }
@@ -90,17 +168,52 @@
       return;
     }
 
-    update(0, '正在连接 Google Drive');
-    const session = await api('google_drive/upload/start', {
-      method: 'POST',
-      headers: apiHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ path, size: file.size, mime_type: file.type || 'application/octet-stream' }),
-      signal,
-    });
+    // The same file at the same destination continues where it stopped.
+    const key = `${path}|${file.size}|${file.lastModified || 0}`;
+    let session = null;
+    let offset = 0;
+    const saved = savedResume(key);
+    if (saved) {
+      update(0, '正在检查上次中断的上传');
+      try {
+        const status = await api('google_drive/upload/status', {
+          headers: apiHeaders({ 'X-Google-Upload-Token': saved.token }),
+          signal,
+        });
+        if (status.complete) {
+          clearResume(key);
+          update(file.size, '已保存');
+          return;
+        }
+        session = { token: status.token || saved.token, chunk_size: saved.chunk_size, key };
+        offset = status.next_offset;
+      } catch (error) {
+        if (signal.aborted) throw cancelled();
+        // A hiccup keeps the saved session for the next try; a lapsed one is dropped.
+        if (retryable(error)) throw error;
+        clearResume(key);
+      }
+    }
+    if (!session) {
+      update(0, '正在连接 Google Drive');
+      session = await api('google_drive/upload/start', {
+        method: 'POST',
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ path, size: file.size, mime_type: file.type || 'application/octet-stream' }),
+        signal,
+      }, START_TIMEOUT_MS);
+      session.key = key;
+      saveResume(key, session);
+    }
     try {
-      await sendInChunks(session, file, signal, update);
+      await sendInChunks(session, file, signal, update, offset);
+      clearResume(key);
     } catch (error) {
-      abandonSession(session);
+      // Only a long outage keeps the session; cancelling or a hard error ends it.
+      if (!error.resumable) {
+        clearResume(key);
+        abandonSession(session);
+      }
       throw error;
     }
   }
@@ -113,52 +226,72 @@
     }).catch(() => {});
   }
 
-  async function sendInChunks(session, file, signal, update) {
-    let offset = 0;
+  async function sendInChunks(session, file, signal, update, offset = 0) {
+    // Chunks shrink while the connection is poor and grow back once it recovers.
+    let chunk = session.chunk_size;
+    let clean = 0;
+    let failures = 0;
+    let failingSince = null; // monotonic time of the first failure since the last progress
+    const remember = () => { if (session.key) saveResume(session.key, session); };
     while (offset < file.size) {
       if (signal.aborted) throw cancelled();
-      const end = Math.min(offset + session.chunk_size, file.size);
-      let completed = false;
-      for (let attempt = 0; attempt < CHUNK_ATTEMPTS; attempt++) {
-        try {
-          const result = await sendFile('google_drive/upload/chunk', apiHeaders({
-            'X-Google-Upload-Token': session.token,
-            'X-Upload-Offset': String(offset),
-            'Content-Type': 'application/octet-stream',
-          }), file.slice(offset, end), signal, sent => update(offset + sent, '正在传输'));
-          if (result.next_offset <= offset) throw new Error('上传进度未前进');
-          // Each accepted chunk renews the session token, so slow uploads can run for days.
-          if (result.token) session.token = result.token;
-          offset = result.next_offset;
-          update(offset, '已传至 Google Drive');
-          completed = result.complete;
-          break;
-        } catch (error) {
-          if (signal.aborted) throw cancelled();
-          if (attempt === CHUNK_ATTEMPTS - 1 || !retryable(error)) throw error;
-          update(offset, `正在恢复连接（第 ${attempt + 1}/${CHUNK_ATTEMPTS - 1} 次重试）`);
-          await pause(Math.min(500 * 2 ** attempt, 5000), signal);
-          let status;
-          try {
-            status = await api('google_drive/upload/status', {
-              headers: apiHeaders({ 'X-Google-Upload-Token': session.token }),
-              signal,
-            });
-          } catch (statusError) {
-            if (signal.aborted) throw cancelled();
-            if (!retryable(statusError)) throw statusError;
-            continue;
-          }
-          if (status.token) session.token = status.token;
-          if (status.complete) { offset = file.size; completed = true; break; }
-          if (status.next_offset > offset) {
-            offset = status.next_offset;
-            update(offset, '已恢复上传');
-            break;
-          }
+      const end = Math.min(offset + chunk, file.size);
+      let reason;
+      try {
+        const result = await sendFile('google_drive/upload/chunk', apiHeaders({
+          'X-Google-Upload-Token': session.token,
+          'X-Upload-Offset': String(offset),
+          'Content-Type': 'application/octet-stream',
+        }), file.slice(offset, end), signal, sent => update(offset + sent, '正在传输'));
+        if (result.next_offset <= offset) throw new Error('Google Drive 没有保存这一段');
+        // Each accepted chunk renews the session token, so slow uploads can run for days.
+        if (result.token) { session.token = result.token; remember(); }
+        offset = result.next_offset;
+        failures = 0;
+        failingSince = null;
+        if (result.complete) { update(file.size, '已保存'); return; }
+        update(offset, '已传至 Google Drive');
+        if (++clean >= 3 && chunk < session.chunk_size) {
+          chunk = Math.min(session.chunk_size, chunk * 2);
+          clean = 0;
         }
+        continue;
+      } catch (error) {
+        if (signal.aborted) throw cancelled();
+        if (!retryable(error)) throw error;
+        reason = error.message;
       }
-      if (completed) { update(file.size, '已保存'); return; }
+
+      clean = 0;
+      failures++;
+      if (failingSince === null) failingSince = performance.now();
+      if (performance.now() - failingSince > PATIENCE_MS) {
+        const error = new Error(`网络持续不可用，上传已暂停（${reason}）。重新选择同一个文件，可从 ${Math.floor(offset / file.size * 100)}% 处继续`);
+        error.resumable = true;
+        throw error;
+      }
+      chunk = Math.max(MIN_CHUNK, Math.floor(chunk / 2 / CHUNK_UNIT) * CHUNK_UNIT);
+      const wait = RETRY_WAITS[Math.min(failures, RETRY_WAITS.length) - 1];
+      update(offset, `正在恢复连接（第 ${failures} 次重试，${wait / 1000} 秒后）：${reason}`);
+      await pause(wait, signal);
+      // Ask Google what it really has: a lost reply may hide a chunk it stored.
+      try {
+        const status = await api('google_drive/upload/status', {
+          headers: apiHeaders({ 'X-Google-Upload-Token': session.token }),
+          signal,
+        });
+        if (status.token) { session.token = status.token; remember(); }
+        if (status.complete) { update(file.size, '已保存'); return; }
+        if (status.next_offset > offset) {
+          offset = status.next_offset;
+          failures = 0;
+          failingSince = null;
+          update(offset, '已恢复上传');
+        }
+      } catch (statusError) {
+        if (signal.aborted) throw cancelled();
+        if (!retryable(statusError)) throw statusError;
+      }
     }
     const status = await api('google_drive/upload/status', {
       headers: apiHeaders({ 'X-Google-Upload-Token': session.token }),

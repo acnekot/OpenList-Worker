@@ -26,6 +26,7 @@ for (const scoped of [false, true]) test(`root quota observer converges for ${sc
     addEventListener: (name, callback) => { events[name] = callback },
     MutationObserver: class { constructor(callback) { observe = callback } observe() {} },
     localStorage: { getItem: () => 'test-token' }, location: { pathname: '/' },
+    AbortController, setTimeout, clearTimeout,
     fetch: async () => ({ ok: scoped, status: scoped ? 200 : 404,
       json: async () => scoped ? { code: 200, data: { used: 0, limit: 536870912000 } } : { code: 404 } }),
   })
@@ -90,6 +91,8 @@ test('upload panel shows progress and cancel aborts the current chunk and remain
     location: { pathname: '/GoogleDrive2' },
     performance,
     AbortController,
+    setTimeout,
+    clearTimeout,
     DOMException,
     MouseEvent: class {},
     fetch: async (url, options) => {
@@ -132,12 +135,26 @@ test('upload panel shows progress and cancel aborts the current chunk and remain
     JSON.parse(call.options.body).path === '/GoogleDrive2/wxb_nb'))
 })
 
-function chunkHarness(script) {
+const MiB = 1024 * 1024
+
+/**
+ * Drives the client's large-file path against a scripted server.
+ *   script(n)  -> what the n-th chunk request answers: { status, body }, or
+ *                 { hang: true } to leave it unanswered (a dead connection)
+ * Timers: retry waits (<= 25 s, except the 8 s panel removal) fire at once;
+ * every longer one (stall watchdogs, API timeouts) waits for fire(ms).
+ */
+function chunkHarness(script, { store = new Map(), fileSize = 8 * MiB + 1, clock = { now: 1000 }, status } = {}) {
   const elements = new Map()
+  let panel
   class Element {
     constructor() { this.listeners = {}; this.children = []; this.hidden = false }
     addEventListener(type, callback) { this.listeners[type] = callback }
-    append(...children) { this.children.push(...children); for (const c of children) if (c.id) elements.set(c.id, c) }
+    append(...children) {
+      this.children.push(...children)
+      for (const c of children) if (c.id) elements.set(c.id, c)
+      for (const c of children) if (c.id === 'catsuki-upload-progress') panel = c
+    }
     after(child) { if (child.id) elements.set(child.id, child) }
     remove() { elements.delete(this.id) }
     setAttribute() {}
@@ -149,19 +166,23 @@ function chunkHarness(script) {
   const apiCalls = []
   const cancelHeaders = []
   const sentHeaders = []
+  const slices = []
+  const timers = []
+  let statusCalls = 0
   let chunkCalls = 0
   class FakeXhr {
     constructor() { this.upload = {}; this.headers = {} }
     open(method, url) { this.url = url }
     setRequestHeader(key, value) { this.headers[key] = value }
-    send(body) {
+    send() {
       chunkCalls++
       sentHeaders.push(this.headers)
       const step = script(chunkCalls)
+      if (step.hang) return
       setImmediate(() => {
         this.status = step.status
         this.responseText = JSON.stringify(step.body)
-        this.onload()
+        step.networkError ? this.onerror() : this.onload()
       })
     }
     abort() { this.onabort?.() }
@@ -173,48 +194,84 @@ function chunkHarness(script) {
     getElementById: id => elements.get(id) || null,
     querySelector: selector => (selector === '.catsuki-upload-icon' ? new Element() : null),
   }
+  const reply = (code, data, ok = true, httpStatus = ok ? 200 : code) =>
+    ({ ok, status: httpStatus, json: async () => ({ code, data, message: ok ? 'success' : 'error' }) })
   const code = fs.readFileSync(new URL('./frontend-upload-client.js', import.meta.url), 'utf8')
   vm.runInNewContext(code, {
     document,
     addEventListener: (event, callback) => { globalEvents[event] = callback },
     MutationObserver: class { observe() {} },
     XMLHttpRequest: FakeXhr,
-    localStorage: { getItem: () => 'test-token' },
+    localStorage: {
+      getItem: key => (key === 'token' ? 'test-token' : store.get(key) ?? null),
+      setItem: (key, value) => { store.set(key, String(value)) },
+    },
     location: { pathname: '/GoogleDrive2' },
-    performance, AbortController, DOMException, MouseEvent: class {},
-    setTimeout: (fn, ms) => (ms >= 8000 ? 0 : setImmediate(fn)),
-    clearTimeout: () => {},
+    performance: { now: () => clock.now }, AbortController, DOMException, MouseEvent: class {},
+    setTimeout: (fn, ms) => {
+      if (ms <= 25000 && ms !== 8000) { setImmediate(fn); return 0 }
+      const timer = { fn, ms, live: true }
+      timers.push(timer)
+      return timer
+    },
+    clearTimeout: timer => { if (timer) timer.live = false },
     fetch: async (url, options = {}) => {
       apiCalls.push(url)
-      if (url.endsWith('/upload/cancel')) cancelHeaders.push(options.headers)
-      if (url.endsWith('/folder_quota')) return { ok: false, status: 404, json: async () => ({ code: 404 }) }
-      if (url.endsWith('/upload/status')) return { ok: true, status: 200, json: async () => ({ code: 200, data: { complete: false, next_offset: 0 } }) }
-      return { ok: true, status: 200, json: async () => ({ code: 200, data: { token: 's', chunk_size: 8 * 1024 * 1024 } }) }
+      if (url.endsWith('/upload/cancel')) { cancelHeaders.push(options.headers); return reply(200, null) }
+      if (url.endsWith('/folder_quota')) return reply(404, null, false)
+      if (url.endsWith('/upload/status')) {
+        statusCalls++
+        const answer = status ? status(statusCalls, options) : { complete: false, next_offset: 0 }
+        if (answer?.hang) {
+          return new Promise((resolve, reject) =>
+            options.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))))
+        }
+        return reply(200, answer)
+      }
+      return reply(200, { token: 's', chunk_size: 8 * MiB })
     },
   })
   documentEvents.DOMContentLoaded()
   globalEvents.DOMContentLoaded()
   elements.set('catsuki-upload-button', new Element())
-  const size = 8 * 1024 * 1024 + 1
-  input.files = [{ name: 'big.bin', size, type: '', slice: (a, b) => ({ size: b - a }) }]
-  return { input, elements, chunkCalls: () => chunkCalls, apiCalls, cancelHeaders, sentHeaders, size }
+  const file = {
+    name: 'big.bin', size: fileSize, type: '', lastModified: 1700000000000,
+    slice: (a, b) => { slices.push([a, b]); return { size: b - a } },
+  }
+  input.files = [file]
+  return {
+    input, elements, apiCalls, cancelHeaders, sentHeaders, slices, store, clock,
+    chunkCalls: () => chunkCalls,
+    panel: () => panel,
+    size: fileSize,
+    // Run the live timer of a given length, as if that long had passed.
+    fire(ms) {
+      const timer = timers.filter(t => t.live && t.ms === ms).pop()
+      assert.ok(timer, `a ${ms} ms timer should be pending`)
+      timer.live = false
+      timer.fn()
+    },
+  }
 }
+const ok = data => ({ status: 200, body: { code: 200, data } })
+const fail = (status, message = 'busy') => ({ status, body: { code: status, message } })
+const tick = () => new Promise(resolve => setImmediate(resolve))
 
 test('large upload rides out several transient chunk failures', async () => {
-  const h = chunkHarness(n => n <= 5
-    ? { status: 503, body: { code: 503, message: 'busy' } }
-    : { status: 200, body: { code: 200, data: { complete: n === 7, next_offset: n === 6 ? 8 * 1024 * 1024 : h.size } } })
+  const h = chunkHarness(n => n <= 5 ? fail(503)
+    : ok({ complete: n === 7, next_offset: n === 6 ? 8 * MiB : h.size }))
   await h.input.listeners.change()
-  assert.equal(h.elements.get('catsuki-upload-progress').children[0].textContent, '上传完成')
+  assert.equal(h.panel().children[0].textContent, '上传完成')
   assert.equal(h.chunkCalls(), 7)
   assert.ok(!h.apiCalls.some(url => url.endsWith('/upload/cancel')), 'a finished upload is not cancelled')
+  assert.equal(h.store.get('catsuki-upload-sessions') === undefined || h.store.get('catsuki-upload-sessions') === '{}', true,
+    'a finished upload leaves nothing to resume')
 })
 
 test('large upload does not retry a permission error', async () => {
-  const h = chunkHarness(() => ({ status: 403, body: { code: 403, message: 'Invalid upload session' } }))
+  const h = chunkHarness(() => fail(403, 'Invalid upload session'))
   await h.input.listeners.change()
-  const panel = h.elements.get('catsuki-upload-progress')
-  assert.equal(panel.children[0].textContent, '上传失败')
+  assert.equal(h.panel().children[0].textContent, '上传失败')
   assert.equal(h.chunkCalls(), 1)
   assert.equal(h.cancelHeaders.length, 1, 'a failed upload hands its session back')
   assert.equal(h.cancelHeaders[0]['X-Google-Upload-Token'], 's')
@@ -222,10 +279,78 @@ test('large upload does not retry a permission error', async () => {
 
 test('large upload sends the renewed token from each chunk answer', async () => {
   const h = chunkHarness(n => n === 1
-    ? { status: 200, body: { code: 200, data: { complete: false, next_offset: 8 * 1024 * 1024, token: 'fresh-1' } } }
-    : { status: 200, body: { code: 200, data: { complete: true, next_offset: h.size } } })
+    ? ok({ complete: false, next_offset: 8 * MiB, token: 'fresh-1' })
+    : ok({ complete: true, next_offset: h.size }))
   await h.input.listeners.change()
   assert.equal(h.chunkCalls(), 2)
   assert.equal(h.sentHeaders[0]['X-Google-Upload-Token'], 's')
   assert.equal(h.sentHeaders[1]['X-Google-Upload-Token'], 'fresh-1')
+})
+
+test('a failed chunk is retried smaller, and the size recovers after clean chunks', async () => {
+  const size = 40 * MiB
+  const end = () => h.slices.at(-1)[1]
+  const h = chunkHarness(n => n === 1 ? fail(502)
+    : ok({ complete: end() === size, next_offset: end(), token: 's' }), { fileSize: size })
+  const upload = h.input.listeners.change()
+  // After the first failure the same offset is retried at half the size.
+  for (let i = 0; h.slices.length < 2 && i < 50; i++) await tick()
+  assert.deepEqual(h.slices[0], [0, 8 * MiB])
+  assert.deepEqual(h.slices[1], [0, 4 * MiB])
+  // Three clean chunks later the size is back to normal.
+  for (let i = 0; h.slices.length < 6 && i < 200; i++) await tick()
+  const lengths = h.slices.map(([a, b]) => (b - a) / MiB)
+  assert.deepEqual(lengths.slice(1, 6), [4, 4, 4, 8, 8])
+  await upload
+  assert.equal(h.panel().children[0].textContent, '上传完成')
+})
+
+test('a request that stops moving is abandoned and retried', async () => {
+  const h = chunkHarness(n => n === 1 ? { hang: true }
+    : ok({ complete: n === 3, next_offset: n === 2 ? 8 * MiB : h.size }))
+  const upload = h.input.listeners.change()
+  for (let i = 0; h.chunkCalls() < 1 && i < 50; i++) await tick()
+  h.fire(45000) // the watchdog: no upload progress for 45 s
+  await upload
+  assert.equal(h.panel().children[0].textContent, '上传完成')
+  assert.equal(h.chunkCalls(), 3)
+})
+
+test('a hung status check times out instead of freezing the panel', async () => {
+  const h = chunkHarness(n => n === 1 ? fail(503) : ok({ complete: true, next_offset: h.size }),
+    { status: n => (n === 1 ? { hang: true } : { complete: false, next_offset: 0 }) })
+  const upload = h.input.listeners.change()
+  for (let i = 0; h.apiCalls.filter(url => url.endsWith('/upload/status')).length < 1 && i < 50; i++) await tick()
+  h.fire(30000) // the API timeout
+  await upload
+  assert.equal(h.panel().children[0].textContent, '上传完成')
+})
+
+test('an outage pauses the upload and choosing the same file resumes it', async () => {
+  const clock = { now: 1000 }
+  const store = new Map()
+  const size = 20 * MiB
+  // First run: one chunk lands, then the network disappears for good.
+  const first = chunkHarness(n => n === 1
+    ? ok({ complete: false, next_offset: 8 * MiB, token: 'fresh-1' })
+    : { networkError: true }, { store, fileSize: size, clock })
+  const run = first.input.listeners.change()
+  for (let i = 0; first.chunkCalls() < 3 && i < 100; i++) await tick()
+  clock.now += 11 * 60 * 1000 // longer than the patience window
+  await run
+  const panel = first.panel()
+  assert.equal(panel.children[0].textContent, '上传失败')
+  assert.match(panel.children[2].textContent, /重新选择同一个文件.*40%/)
+  assert.equal(first.cancelHeaders.length, 0, 'the session is kept for resuming')
+  assert.ok(store.get('catsuki-upload-sessions').includes('fresh-1'), 'the renewed token is remembered')
+
+  // Second run: the same file continues from what Google already holds.
+  const second = chunkHarness(() => ok({ complete: true, next_offset: size }),
+    { store, fileSize: size, clock, status: () => ({ complete: false, next_offset: 8 * MiB, token: 'resumed' }) })
+  await second.input.listeners.change()
+  assert.equal(second.panel().children[0].textContent, '上传完成')
+  assert.ok(!second.apiCalls.some(url => url.endsWith('/upload/start')), 'no new session is opened')
+  assert.equal(second.sentHeaders[0]['X-Upload-Offset'], String(8 * MiB))
+  assert.equal(second.sentHeaders[0]['X-Google-Upload-Token'], 'resumed')
+  assert.equal(JSON.parse(store.get('catsuki-upload-sessions') || '{}')['/GoogleDrive2/big.bin|' + size + '|1700000000000'], undefined)
 })

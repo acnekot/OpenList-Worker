@@ -186,3 +186,15 @@ test("googleFreeSpace: remaining bytes, or null when unlimited or unknown", asyn
   assert.equal(await googleFreeSpace({ getStorageQuota: async () => { throw new Error("offline") } }), null)
   assert.equal(await googleFreeSpace({}), null)
 })
+
+test("chunk: a Google connection that times out is a retryable 504", async () => {
+  await seed()
+  globalThis.fetch = (async () => {
+    throw new DOMException("The operation timed out", "TimeoutError")
+  }) as any
+  const body = new Uint8Array(256 * 1024)
+  const res = await chunk(body, { "Content-Length": String(body.length) })
+  const json: any = await res.json()
+  assert.equal(res.status, 504)
+  assert.match(json.message, /响应超时/)
+})

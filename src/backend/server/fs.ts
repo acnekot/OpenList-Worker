@@ -1032,8 +1032,23 @@ async function googleUploadFailure(res: Response): Promise<GoogleUploadError> {
   return new GoogleUploadError(`Google Drive 拒绝了上传 (HTTP ${res.status})`, 422)
 }
 
+// A stalled Google connection must end with a readable, retryable answer
+// before the browser gives up on its own.
+async function googleFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+  } catch (e: any) {
+    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+      throw new GoogleUploadError("Google Drive 响应超时", 504)
+    }
+    throw e
+  }
+}
+
 function googleUploadErrorResponse(c: any, e: any) {
   const status = e instanceof GoogleUploadError ? e.httpStatus : 502
+  // Visible in `wrangler tail`; the message never carries tokens or URLs.
+  console.warn(`[google-upload] ${c.req.method} ${c.req.path} -> ${status}: ${safeErrorMessage(e)}`)
   return c.json({ code: status, message: safeErrorMessage(e), data: null }, status as any)
 }
 
@@ -1217,7 +1232,7 @@ fsRouter.put("/google_drive/upload/chunk", async (c) => {
     return c.json({ code: 400, message: "Invalid chunk size", data: null }, 400)
   }
   try {
-    const res = await fetch(grant.url, {
+    const res = await googleFetch(grant.url, {
       method: "PUT",
       redirect: "manual",
       headers: {
@@ -1225,7 +1240,7 @@ fsRouter.put("/google_drive/upload/chunk", async (c) => {
         "Content-Type": "application/octet-stream",
       },
       body,
-    })
+    }, 75_000)
     const progress = await googleUploadProgress(res, grant.size)
     if (progress.complete) {
       await completeFolderQuotaReservation(c.env, grant.reservationId)
@@ -1252,11 +1267,11 @@ fsRouter.get("/google_drive/upload/status", async (c) => {
   const parent = grant.path.slice(0, grant.path.lastIndexOf("/")) || "/"
   if (!canWriteMeta(user, await getNearestMeta(parent, c.env), parent)) return permissionDenied(c)
   try {
-    const res = await fetch(grant.url, {
+    const res = await googleFetch(grant.url, {
       method: "PUT",
       redirect: "manual",
       headers: { "Content-Range": `bytes */${grant.size}` },
-    })
+    }, 25_000)
     const progress = await googleUploadProgress(res, grant.size)
     if (progress.complete) {
       await completeFolderQuotaReservation(c.env, grant.reservationId)
@@ -1278,7 +1293,7 @@ fsRouter.post("/google_drive/upload/cancel", async (c) => {
   if (!canWrite(user)) return permissionDenied(c)
   const grant = await readGoogleUploadGrant(c, user!.id || 0)
   if (!grant) return c.json({ code: 403, message: "Invalid upload session", data: null }, 403)
-  try { await fetch(grant.url, { method: "DELETE", redirect: "manual" }) } catch {}
+  try { await googleFetch(grant.url, { method: "DELETE", redirect: "manual" }, 10_000) } catch {}
   try { await releaseFolderQuotaReservation(c.env, grant.reservationId) } catch {}
   return c.json({ code: 200, message: "success", data: null })
 })
