@@ -1073,7 +1073,7 @@ fsRouter.post("/google_drive/upload/start", async (c) => {
     const url = await (driver as any).startResumableUpload(resolved.physical!, size, mimeType)
     const token = await signGoogleUpload(c, {
       url, size, path: reqPath, userId: user!.id || 0,
-      expires: Date.now() + 6 * 60 * 60 * 1000,
+      expires: Date.now() + 24 * 60 * 60 * 1000,
       ...(reservation ? { reservationId: reservation } : {}),
     })
     return c.json({ code: 200, message: "success", data: { token, chunk_size: GOOGLE_CHUNK_SIZE } })

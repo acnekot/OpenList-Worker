@@ -131,3 +131,84 @@ test('upload panel shows progress and cancel aborts the current chunk and remain
   assert.ok(apiCalls.some(call => call.url.endsWith('/mkdir') &&
     JSON.parse(call.options.body).path === '/GoogleDrive2/wxb_nb'))
 })
+
+function chunkHarness(script) {
+  const elements = new Map()
+  class Element {
+    constructor() { this.listeners = {}; this.children = []; this.hidden = false }
+    addEventListener(type, callback) { this.listeners[type] = callback }
+    append(...children) { this.children.push(...children); for (const c of children) if (c.id) elements.set(c.id, c) }
+    after(child) { if (child.id) elements.set(child.id, child) }
+    remove() { elements.delete(this.id) }
+    setAttribute() {}
+    click() { this.listeners.click?.() }
+  }
+  const input = new Element()
+  const documentEvents = {}
+  const globalEvents = {}
+  const apiCalls = []
+  let chunkCalls = 0
+  class FakeXhr {
+    constructor() { this.upload = {} }
+    open(method, url) { this.url = url }
+    setRequestHeader() {}
+    send(body) {
+      chunkCalls++
+      const step = script(chunkCalls)
+      setImmediate(() => {
+        this.status = step.status
+        this.responseText = JSON.stringify(step.body)
+        this.onload()
+      })
+    }
+    abort() { this.onabort?.() }
+  }
+  const document = {
+    body: new Element(),
+    createElement: tag => tag === 'input' ? input : new Element(),
+    addEventListener: (event, callback) => { documentEvents[event] = callback },
+    getElementById: id => elements.get(id) || null,
+    querySelector: selector => (selector === '.catsuki-upload-icon' ? new Element() : null),
+  }
+  const code = fs.readFileSync(new URL('./frontend-upload-client.js', import.meta.url), 'utf8')
+  vm.runInNewContext(code, {
+    document,
+    addEventListener: (event, callback) => { globalEvents[event] = callback },
+    MutationObserver: class { observe() {} },
+    XMLHttpRequest: FakeXhr,
+    localStorage: { getItem: () => 'test-token' },
+    location: { pathname: '/GoogleDrive2' },
+    performance, AbortController, DOMException, MouseEvent: class {},
+    setTimeout: (fn, ms) => (ms >= 8000 ? 0 : setImmediate(fn)),
+    clearTimeout: () => {},
+    fetch: async url => {
+      apiCalls.push(url)
+      if (url.endsWith('/folder_quota')) return { ok: false, status: 404, json: async () => ({ code: 404 }) }
+      if (url.endsWith('/upload/status')) return { ok: true, status: 200, json: async () => ({ code: 200, data: { complete: false, next_offset: 0 } }) }
+      return { ok: true, status: 200, json: async () => ({ code: 200, data: { token: 's', chunk_size: 8 * 1024 * 1024 } }) }
+    },
+  })
+  documentEvents.DOMContentLoaded()
+  globalEvents.DOMContentLoaded()
+  elements.set('catsuki-upload-button', new Element())
+  const size = 8 * 1024 * 1024 + 1
+  input.files = [{ name: 'big.bin', size, type: '', slice: (a, b) => ({ size: b - a }) }]
+  return { input, elements, chunkCalls: () => chunkCalls, apiCalls, size }
+}
+
+test('large upload rides out several transient chunk failures', async () => {
+  const h = chunkHarness(n => n <= 5
+    ? { status: 503, body: { code: 503, message: 'busy' } }
+    : { status: 200, body: { code: 200, data: { complete: n === 7, next_offset: n === 6 ? 8 * 1024 * 1024 : h.size } } })
+  await h.input.listeners.change()
+  assert.equal(h.elements.get('catsuki-upload-progress').children[0].textContent, '上传完成')
+  assert.equal(h.chunkCalls(), 7)
+})
+
+test('large upload does not retry a permission error', async () => {
+  const h = chunkHarness(() => ({ status: 403, body: { code: 403, message: 'Invalid upload session' } }))
+  await h.input.listeners.change()
+  const panel = h.elements.get('catsuki-upload-progress')
+  assert.equal(panel.children[0].textContent, '上传失败')
+  assert.equal(h.chunkCalls(), 1)
+})

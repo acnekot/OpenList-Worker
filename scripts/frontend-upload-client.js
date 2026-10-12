@@ -1,5 +1,14 @@
 (() => {
   const SMALL_FILE = 8 * 1024 * 1024;
+  const CHUNK_ATTEMPTS = 8;
+  // Permission, quota and bad-request answers will not change on retry.
+  const retryable = error => !error.status || error.status >= 500 || error.status === 408 || error.status === 429;
+  const pause = (ms, signal) => new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(cancelled());
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+    const onAbort = () => { clearTimeout(timer); reject(cancelled()); };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
   const input = document.createElement('input');
   input.type = 'file';
   input.multiple = true;
@@ -33,7 +42,9 @@
     const response = await fetch('/api/fs/' + url, options);
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data.code !== 200) {
-      throw new Error(data.message || `上传失败 (HTTP ${response.status})`);
+      const error = new Error(data.message || `上传失败 (HTTP ${response.status})`);
+      error.status = response.status;
+      throw error;
     }
     return data.data;
   }
@@ -53,7 +64,11 @@
         let data;
         try { data = JSON.parse(xhr.responseText); } catch { data = {}; }
         if (xhr.status >= 200 && xhr.status < 300 && data.code === 200) resolve(data.data);
-        else reject(new Error(data.message || `上传失败 (HTTP ${xhr.status})`));
+        else {
+          const error = new Error(data.message || `上传失败 (HTTP ${xhr.status})`);
+          error.status = xhr.status;
+          reject(error);
+        }
       };
       xhr.onerror = () => { cleanup(); reject(new Error('网络连接中断')); };
       xhr.onabort = () => { cleanup(); reject(cancelled()); };
@@ -87,7 +102,7 @@
       if (signal.aborted) throw cancelled();
       const end = Math.min(offset + session.chunk_size, file.size);
       let completed = false;
-      for (let attempt = 0; attempt < 4; attempt++) {
+      for (let attempt = 0; attempt < CHUNK_ATTEMPTS; attempt++) {
         try {
           const result = await sendFile('google_drive/upload/chunk', apiHeaders({
             'X-Google-Upload-Token': session.token,
@@ -101,12 +116,20 @@
           break;
         } catch (error) {
           if (signal.aborted) throw cancelled();
-          if (attempt === 3) throw error;
+          if (attempt === CHUNK_ATTEMPTS - 1 || !retryable(error)) throw error;
           update(offset, '正在恢复连接');
-          const status = await api('google_drive/upload/status', {
-            headers: apiHeaders({ 'X-Google-Upload-Token': session.token }),
-            signal,
-          });
+          await pause(Math.min(500 * 2 ** attempt, 5000), signal);
+          let status;
+          try {
+            status = await api('google_drive/upload/status', {
+              headers: apiHeaders({ 'X-Google-Upload-Token': session.token }),
+              signal,
+            });
+          } catch (statusError) {
+            if (signal.aborted) throw cancelled();
+            if (!retryable(statusError)) throw statusError;
+            continue;
+          }
           if (status.complete) { offset = file.size; completed = true; break; }
           if (status.next_offset > offset) {
             offset = status.next_offset;
