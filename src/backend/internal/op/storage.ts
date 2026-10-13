@@ -1598,6 +1598,23 @@ export async function removeItems(
   }
 }
 
+// Google Drive moves and copies work by file id inside one account, so the
+// destination must be in the same storage; elsewhere the path would be looked
+// up in the wrong Drive (or silently land in the wrong folder).
+function assertSameGoogleDriveStorage(src: any, dst: any): void {
+  const isGoogleDrive = (s: any) =>
+    String(s?.driver || "").toLowerCase().replace(/[^a-z0-9]/g, "") === "googledrive"
+  if (!isGoogleDrive(src)) return
+  const same = src.id !== undefined || dst.id !== undefined
+    ? src.id === dst.id
+    : src.mount_path === dst.mount_path
+  if (!same) {
+    throw new Error(
+      "Cannot move or copy between different Google Drive storages; download and upload the file instead",
+    )
+  }
+}
+
 export async function moveItems(
   srcDir: string,
   dstDir: string,
@@ -1612,6 +1629,7 @@ export async function moveItems(
     if (srcResolved.isVirtual || dstResolved.isVirtual) {
       throw new Error("failed get storage: storage not found")
     }
+    assertSameGoogleDriveStorage(srcResolved.storage, dstResolved.storage)
 
     const driver = await getDriver(
       srcResolved.storage!.driver,
@@ -1650,6 +1668,7 @@ export async function copyItems(
     if (srcResolved.isVirtual || dstResolved.isVirtual) {
       throw new Error("failed get storage: storage not found")
     }
+    assertSameGoogleDriveStorage(srcResolved.storage, dstResolved.storage)
 
     const driver = await getDriver(
       srcResolved.storage!.driver,

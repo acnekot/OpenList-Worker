@@ -503,6 +503,18 @@ export class GoogleDriveClient {
     return currentId
   }
 
+  /** Forget cached ids for a path and everything below it (after move, rename, delete). */
+  public forget(physicalPath: string): void {
+    const clean = physicalPath.split("/").filter(Boolean).join("/")
+    if (!clean) {
+      this.pathCache.clear()
+      return
+    }
+    for (const key of [...this.pathCache.keys()]) {
+      if (key === clean || key.startsWith(clean + "/")) this.pathCache.delete(key)
+    }
+  }
+
   public async resolveParentAndName(
     physicalPath: string,
   ): Promise<{ parentId: string; name: string }> {

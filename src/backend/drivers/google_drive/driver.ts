@@ -7,6 +7,13 @@ import {
 } from "./types"
 import { GoogleDriveClient } from "./util"
 
+// "/a/b/c" -> "/a/b"
+function parentPath(physicalPath: string): string {
+  const parts = physicalPath.split("/").filter(Boolean)
+  parts.pop()
+  return "/" + parts.join("/")
+}
+
 function googleFileToFileItem(f: GoogleFile): FileItem {
   return {
     name: f.name,
@@ -94,6 +101,7 @@ export class GoogleDrive implements StorageDriver {
   ): Promise<void> {
     const fileId = await this.client.resolveFileId(physicalPath)
     await this.client.rename(fileId, newName)
+    this.client.forget(physicalPath)
   }
 
   async remove(
@@ -103,35 +111,36 @@ export class GoogleDrive implements StorageDriver {
   ): Promise<void> {
     const fileId = await this.client.resolveFileId(physicalPath)
     await this.client.remove(fileId)
+    this.client.forget(physicalPath)
   }
 
+  // Both paths are physical (relative to this storage's root). The destination
+  // folder is the parent of dstPhysical: the virtual dstDir still carries the
+  // mount path (for example /GoogleDrive2), which does not exist inside Drive.
   async move(
-    srcDir: string,
-    dstDir: string,
+    _srcDir: string,
+    _dstDir: string,
     _names: string[],
     srcPhysical: string,
-    _dstPhysical: string,
+    dstPhysical: string,
   ): Promise<void> {
     const fileId = await this.client.resolveFileId(srcPhysical)
-    const srcParts = srcPhysical.split("/").filter(Boolean)
-    srcParts.pop()
-    const srcParentId = await this.client.resolveFileId(
-      "/" + srcParts.join("/"),
-    )
-    const dstParentId = await this.client.resolveFileId(dstDir)
+    const srcParentId = await this.client.resolveFileId(parentPath(srcPhysical))
+    const dstParentId = await this.client.resolveFileId(parentPath(dstPhysical))
     await this.client.move(fileId, srcParentId, dstParentId)
+    this.client.forget(srcPhysical)
   }
 
   async copy(
     _srcDir: string,
-    dstDir: string,
+    _dstDir: string,
     _names: string[],
     srcPhysical: string,
-    _dstPhysical: string,
+    dstPhysical: string,
   ): Promise<void> {
     const fileId = await this.client.resolveFileId(srcPhysical)
     const name = srcPhysical.split("/").filter(Boolean).pop() || "copy"
-    const dstParentId = await this.client.resolveFileId(dstDir)
+    const dstParentId = await this.client.resolveFileId(parentPath(dstPhysical))
     await this.client.copy(fileId, dstParentId, name)
   }
 
